@@ -1,7 +1,7 @@
 # Directory
-.vscode
-__pycache__
-/dlwpt-code-master
+.vscode/
+__pycache__/
+dlwpt-code-master/
 
 # File
 dlwpt-code-master.zip
