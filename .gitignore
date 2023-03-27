@@ -3,6 +3,8 @@
 __pycache__/
 dlwpt-code-master/
 AI_Data/
+build/
 
 # File
 dlwpt-code-master.zip
+p3_deploy/torch_cpu.dll
