@@ -1,3 +1,5 @@
+"""サーバークライアントモデルのクライアント
+"""
 import io
 import json
 import requests

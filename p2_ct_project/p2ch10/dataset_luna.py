@@ -9,9 +9,7 @@ from collections import namedtuple
 import SimpleITK as sitk
 import numpy as np
 
-import torch
-import torch.cuda
-from torch.utils.data import Dataset
+
 
 from util.disk import getCache
 from util.util import XyzTuple, xyz2irc
@@ -24,19 +22,24 @@ log.setLevel(logging.DEBUG)
 
 raw_cache = getCache('part2ch10_raw')
 
+# 結節の状態(分類対象), 直径, 識別子, 結節候補の中心座標
 CandidateInfoTuple = namedtuple(
     'CandidateInfoTuple',
     'isNodule_bool, diameter_mm, series_uid, center_xyz',
 )
 
-@functools.lru_cache(1)
+# Make CandidateInfoTuple with Helper 関数 for loading luna dataset
+@functools.lru_cache(1) # インメモリでキャッシングを行う標準的なライブラリ : getCandidateInfoList関数の結果をメモリキャッシュに保存する
 def getCandidateInfoList(requireOnDisk_bool=True):
     # We construct a set with all series_uids that are present on disk.
     # This will let us use the data, even if we haven't downloaded all of
     # the subsets yet.
-    mhd_list = glob.glob('data-unversioned/part2/luna/subset*/*.mhd')
-    presentOnDisk_set = { os.path.split(p)[-1][:-4] for p in mhd_list }
 
+    # 生データ(3D)
+    mhd_list = glob.glob('data-unversioned/part2/luna/subset*/*.mhd')
+    presentOnDisk_set = { os.path.split(p)[-1][:-4] for p in mhd_list } # filenames
+
+    # アノテーション(annotations.csv)から直径の情報をマージする
     diameter_dict = {}
     with open('data/part2/luna/annotations.csv', 'r') as f:
         for row in list(csv.reader(f))[1:]:
@@ -48,15 +51,19 @@ def getCandidateInfoList(requireOnDisk_bool=True):
                 (annotationCenter_xyz, annotationDiameter_mm)
             )
     
+    # CandidateデータをAnnoatationデータでフィルタリングする
+    # presetOnDisk_setに存在する`series_uid`のみを扱う
+    # AnnotationとCandidateで各中心座標(x,y,z)の距離がAnnotationDiameter_mmの1/4以下のもののみを扱う
     candidateInfo_list = []
     with open('data/part2/luna/candidate.csv', 'r') as f:
         for row in list(csv.reader(f))[1:]:
             series_uid = row[0]
 
             if series_uid not in presentOnDisk_set and requireOnDisk_bool:
+                # series_uidが存在しない場合, ディクス上にないサブセットデータなのでスキップ.
                 continue
 
-            isNodule_bool = bool(int(row[4]))
+            isNodule_bool = bool(int(row[4])) # 0 : 結節ではない, 1 : 結節である
             candidateCenter_xyz = tuple([float(x) for x in row[1:4]])
 
             candidateDiameter_mm = 0.0
@@ -65,6 +72,11 @@ def getCandidateInfoList(requireOnDisk_bool=True):
                 for i in range(3):
                     delta_mm = abs(candidateCenter_xyz[i] - annotationCenter_xyz[i])
                     if delta_mm > annotationDiameter_mm / 4:
+                        # 直径を2で除算して半径を求めた上で,
+                        # 半径を2で除算することで,
+                        # 結節に対する2つのファイルの中心座標のズレが
+                        # 結節の大きさに対して大きくないことを確認する.
+                        # (これは, 距離をチェックしているのではなく, アノテーションのバウンディングボックスの正常性をチェックしている)
                         break
                 else:
                     candidateDiameter_mm = annotationDiameter_mm
@@ -78,24 +90,29 @@ def getCandidateInfoList(requireOnDisk_bool=True):
             ))
 
     candidateInfo_list.sort(reverse=True)
+    # これにより, 最も大きいサイズのものから始まる実際の結節サンプルに続いて, 
+    # (結節のサイズの情報を持たない)結節でないサンプルが続くことになる.
     return candidateInfo_list
 
 
+# Step2. CTインスタンス
 class Ct:
+    # series_uidでデータを指定
     def __init__(self, series_uid):
         mhd_path = glob.glob('data-unversioned/part2/luna/subset*/{}.mhd'.format(series_uid))[0]
 
-        ct_mhd = sitk.ReadImage(mhd_path)
-        ct_a = np.array(sitk.GetArrayFromImage(ct_mhd), dtype=np.float32)
+        # sitk.ReadImageは, 与えられた*.mhdファイルに加えて, *.rawファイルも暗黙的に使用する.
+        ct_mhd = sitk.ReadImage(mhd_path) # numpy
+        ct_a = np.array(sitk.GetArrayFromImage(ct_mhd), dtype=np.float32) # as np.float32 (D,H,W)
 
         # CTs are natively expressed in https://en.wikipedia.org/wiki/Hounsfield_scale
         # HU are scaled oddly, with 0 g/cc (air, approximately) being -1000 and 1 g/cc (water) being 0.
         # The lower bound gets rid of negative density stuff used to indicate out-of-FOV
         # The upper bound nukes any weird hotspots and clamps bone down
-        ct_a.clip(-1000, 1000, ct_a)
+        ct_a.clip(-1000, 1000, ct_a) # ボクセル値のクリップ CTの慣例に従う
 
         self.series_uid = series_uid
-        self.hu_a = ct_a
+        self.hu_a = ct_a # ハンスフィールド単位
 
         self.origin_xyz = XyzTuple(*ct_mhd.GetOrigin())
         self.vxSize_xyz = XyzTuple(*ct_mhd.GetSpacing())
@@ -147,8 +164,12 @@ def getCtRawCandidate(series_uid, center_xyz, width_irc):
     return ct_chunk, center_irc
     
 
+# Step3. Pytorch用LunaDataset
+import torch
+import torch.cuda
+from torch.utils.data import Dataset
 
-class LunaData(Dataset):
+class LunaDataSet(Dataset):
 
     def __init__(self,
                  val_stride=0,
