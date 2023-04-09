@@ -7,7 +7,7 @@ import time
 # import torch
 import numpy as np
 
-from util.logconf import logging
+from .logconf import logging
 log = logging.getLogger(__name__)
 # log.setLevel(logging.WARN)
 # log.setLevel(logging.INFO)
@@ -43,6 +43,8 @@ def importstr(module_str, from_=None):
         module_str, from_ = module_str.rsplit(':')
 
     module = __import__(module_str)
+    print('module: ', module)
+
     for sub_str in module_str.split('.')[1:]:
         module = getattr(module, sub_str)
     

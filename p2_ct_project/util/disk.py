@@ -1,9 +1,16 @@
 import gzip
 
-from diskcache import FanoutCache, Disk
-from diskcache.core import BytesType, MODE_BINARY, BytesIO
+# from diskcache import FanoutCache, Disk
+# from diskcache.core import BytesType, MODE_BINARY, BytesIO
 
-from util.logconf import logging
+# DiskCache
+from diskcache import FanoutCache, Disk, core
+from diskcache.core import io
+from io import BytesIO
+from diskcache.core import MODE_BINARY
+from cassandra.cqltypes import BytesType
+
+from .logconf import logging
 log = logging.getLogger(__name__)
 # log.setLevel(logging.WARN)
 log.setLevel(logging.INFO)

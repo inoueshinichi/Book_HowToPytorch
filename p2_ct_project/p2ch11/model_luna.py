@@ -5,7 +5,7 @@ import math
 
 import torch.nn as nn
 
-from util.logconf import logging
+from ..util.logconf import logging
 
 
 
@@ -44,7 +44,7 @@ class LunaBlock(nn.Module):
         return self.maxpool(block_out)
     
 
-class LunaModel(nn.Model):
+class LunaModel(nn.Module):
     
     # 入力サイズは(N, 1, 32, 48, 48)
     def __init__(self, in_channels=1, conv_channels=8):

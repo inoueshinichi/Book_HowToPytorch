@@ -1,7 +1,7 @@
 import logging
 import logging.handlers
 
-root_logger = logging.GetLogger()
+root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 
 # Some libraries attempt to add their own root logger handlers. This is

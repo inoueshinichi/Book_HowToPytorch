@@ -15,10 +15,10 @@ import torch.nn as nn
 from torch.optim import SGD, Adam
 from torch.utils.data import DataLoader
 
-from util.util import enumerateWithEstimate
-from util.logconf import logging
-from p2ch10.dataset_luna import LunaDataSet
-from .model import LunaModel
+from ..util.util import enumerateWithEstimate
+from ..util.logconf import logging
+from ..p2ch10.dataset_luna import LunaDataset
+from .model_luna import LunaModel
 
 log = logging.getLogger(__name__)
 # log.setLevel(logging.WARN)
@@ -31,7 +31,7 @@ METRICS_PRED_NDX=1
 METRICS_LOSS_NDX=1
 METRICS_SIZE=3
 
-class LunaTraningApp:
+class LunaTrainingApp:
 
     def __init__(self, sys_argv=None):
         if sys_argv is None:
@@ -62,13 +62,18 @@ class LunaTraningApp:
             nargs='?',
             default='dwlpt',
         )
+        # データセットディレクトリの指定
+        parser.add_argument('--datasetdir',
+            help="Luna dataset directory",
+            default='E:/Luna16'
+        )
 
         self.cli_args = parser.parse_args(sys_argv)
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
 
         self.trn_writer = None
         self.val_writer = None
-        self.totalTraningSamples_count = 0
+        self.totalTrainingSamples_count = 0
 
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
@@ -90,7 +95,10 @@ class LunaTraningApp:
         # return Adam(self.model_parameters())
     
     def initTrainDl(self):
-        train_ds = LunaDataSet(val_stride=0, isValSet_bool=False)
+        datasetdir = self.cli_args.datasetdir # データセットディレクトリ
+        train_ds = LunaDataset(datasetdir=datasetdir, 
+                               val_stride=0, 
+                               isValSet_bool=False)
 
         batch_size = self.cli_args.batch_size
         if self.use_cuda:
@@ -106,7 +114,10 @@ class LunaTraningApp:
         return train_dl
     
     def initValDl(self):
-        val_ds = LunaDataSet(val_stride=10, isValSet_bool=True)
+        datasetdir = self.cli_args.datasetdir # データセットディレクトリ
+        val_ds = LunaDataset(datasetdir=datasetdir,
+                             val_stride=10, 
+                             isValSet_bool=True)
 
         batch_size = self.cli_args.batch_size
         if self.use_cuda:
@@ -122,7 +133,16 @@ class LunaTraningApp:
         return val_dl
     
     def initTensorboardWriters(self):
-        pass
+        if self.trn_writer is None:
+            log_dir = os.path.join('runs', self.cli_args.tb_prefix, self.time_str)
+
+            self.trn_writer = SummaryWriter(
+                log_dir=log_dir + "-trn_cls-" + self.cli_args.comment
+            )
+
+            self.val_writer = SummaryWriter(
+                log_dir=log_dir + "-val_cls-" + self.cli_args.comment
+            )
 
     def main(self):
         log.info("Starting {}, {}".format(type(self).__name__, self.cli_args))
@@ -193,9 +213,10 @@ class LunaTraningApp:
 
         return trnMetrics_g.to('cpu')
     
-    def toValidation(self, epoch_ndx, val_dl):
+    def doValidation(self, epoch_ndx, val_dl):
         with torch.no_grad():
             self.model.eval()
+            
             valMetrics_g = torch.zeros(
                 METRICS_SIZE,
                 len(val_dl.dataset),
@@ -227,7 +248,10 @@ class LunaTraningApp:
 
         # reduction='none'でサンプル毎の損失を計算
         loss_func = nn.CrossEntropyLoss(reduction='none')
-        loss_g = loss_func(logits_g, label_g[:, 1])
+        loss_g = loss_func(
+            logits_g, 
+            label_g[:, 1],
+        )
 
         start_ndx = batch_ndx * batch_size
         end_ndx = start_ndx + label_t.size(0) # ミニバッチ数(端数あり)
@@ -240,12 +264,13 @@ class LunaTraningApp:
         return loss_g.mean() # サンプル毎の損失を1バッチ分に平均化
     
 
-    def logMetrics(self, epoch_ndx, mode_str, metrics_t, classificationThread=0.5):
+    def logMetrics(self, epoch_ndx, mode_str, metrics_t, classificationThreshold=0.5):
+
         self.initTensorboardWriters()
         log.info("E{} {}".format(epoch_ndx, type(self).__name__))
 
-        negLabel_mask = metrics_t[METRICS_LABEL_NDX] <= classificationThread
-        negPred_mask = metrics_t[METRICS_PRED_NDX] <= classificationThread
+        negLabel_mask = metrics_t[METRICS_LABEL_NDX] <= classificationThreshold
+        negPred_mask = metrics_t[METRICS_PRED_NDX] <= classificationThreshold
 
         posLabel_mask = ~negLabel_mask
         posPred_mask = ~negPred_mask
@@ -303,18 +328,20 @@ class LunaTraningApp:
 
         writer = getattr(self, mode_str + '_writer')
 
+        # Scalar
         for key, value in metrics_dict.items():
-            writer.add_scalar(key, value, self.totalTraningSamples_count)
+            writer.add_scalar(key, value, self.totalTrainingSamples_count)
 
+        # PR_Curve
         writer.add_pr_curve(
             'pr',
             metrics_t[METRICS_LABEL_NDX],
             metrics_t[METRICS_PRED_NDX],
-            self.totalTraningSamples_count
+            self.totalTrainingSamples_count
         )
 
+        # Histogram
         bins = [x / 50.0 for x in range(51)]
-
         negHist_mask = negLabel_mask & (metrics_t[METRICS_PRED_NDX] > 0.01)
         posHist_mask = posLabel_mask & (metrics_t[METRICS_PRED_NDX] < 0.99)
 
@@ -322,15 +349,15 @@ class LunaTraningApp:
             writer.add_histogram(
                 'is_neg',
                 metrics_t[METRICS_PRED_NDX, negHist_mask],
-                self.totalTraningSamples_count,
+                self.totalTrainingSamples_count,
                 bins=bins,
             )
 
         if posHist_mask.any():
-            writer.add_histgram(
+            writer.add_histogram(
                 'is_pos',
                 metrics_t[METRICS_PRED_NDX, posHist_mask],
-                self.totalTraningSamples_count,
+                self.totalTrainingSamples_count,
                 bins=bins,
             )
 
@@ -367,5 +394,5 @@ class LunaTraningApp:
     #                 raise  
 
 if __name__ == "__main__":
-    LunaTraningApp().main()
+    LunaTrainingApp().main()
 

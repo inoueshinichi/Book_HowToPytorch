@@ -4,6 +4,11 @@ __pycache__/
 dlwpt-code-master/
 AI_Data/
 build/
+p2_ct_project/p2_ch10/__pycache__/
+p2_ct_project/p2_ch11/__pycache__/
+data-unversioned/
+runs/
+
 
 # File
 dlwpt-code-master.zip
