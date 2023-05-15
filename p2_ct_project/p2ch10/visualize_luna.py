@@ -4,7 +4,17 @@ matplotlib.use('nbagg')
 import numpy as np
 import matplotlib.pyplot as plt
 
-from .dataset_luna import Ct, LunaDataset
+import os
+import sys
+
+# os.sepはプラットフォーム固有の区切り文字(Windows: `\`, Unix: `/`)
+module_parent_dir = os.sep.join([os.path.dirname(__file__), '..']) # p2_ct_project
+print("module_parent_dir", module_parent_dir)
+sys.path.append(module_parent_dir)
+
+from dataset_luna import Ct
+# from dataset_luna import LunaDataset
+from p2ch12.mod_dataset_luna import LunaDataset
 
 clim = (-1000.0, 300)
 

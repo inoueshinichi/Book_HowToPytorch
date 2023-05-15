@@ -45,7 +45,9 @@ def importstr(module_str, from_=None):
     module = __import__(module_str)
     print('module: ', module)
 
-    for sub_str in module_str.split('.')[1:]:
+    # start
+    start_index = 1 # 2
+    for sub_str in module_str.split('.')[start_index:]:
         module = getattr(module, sub_str)
     
     if from_:

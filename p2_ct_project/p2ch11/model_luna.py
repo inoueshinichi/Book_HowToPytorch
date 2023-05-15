@@ -5,7 +5,15 @@ import math
 
 import torch.nn as nn
 
-from ..util.logconf import logging
+import os
+import sys
+
+# os.sepはプラットフォーム固有の区切り文字(Windows: `\`, Unix: `/`)
+module_parent_dir = os.sep.join([os.path.dirname(__file__), '..']) # p2_ct_project
+print("module_parent_dir", module_parent_dir)
+sys.path.append(module_parent_dir)
+
+from util.logconf import logging
 
 
 
@@ -62,8 +70,8 @@ class LunaModel(nn.Module):
         # Head
         main_flatten_out_dim = 1152
         self.flatten = nn.Flatten(start_dim=1, end_dim=-1)
-        self.head_linear = nn.Linear(main_flatten_out_dim, 2)
-        self.head_softmax = nn.Softmax(dim=1)
+        self.head_linear = nn.Linear(main_flatten_out_dim, 2) # (陰性スコア, 陽性スコア)
+        self.head_softmax = nn.Softmax(dim=1) # (陰性尤度, 陽性尤度)
 
         # Iniliaze weights
         self._init_weights()
@@ -85,7 +93,7 @@ class LunaModel(nn.Module):
         linear_output = self.head_linear(conv_flat)
 
         # (logits, softmax)
-        return linear_output, self.head_softmax(linear_output)
+        return linear_output, self.head_softmax(linear_output) # (陰性スコア, 陽性スコア), (陰性尤度, 陽性尤度)
     
     # see also https://github.com/pytorch/pytorch/issues/18182
     def _init_weights(self):

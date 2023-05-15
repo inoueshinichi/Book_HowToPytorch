@@ -16,9 +16,9 @@ from torch.optim import SGD
 from torch.utils.data import DataLoader
 
 from util.util import enumerateWithEstimate
-from p2ch10.dataset_luna import LunaDataset
+from p2ch12.mod_dataset_luna import LunaDataset # p2ch12のLunaDatasetを使用
 from util.logconf import logging
-from p2ch11.model_luna import LunaModel
+from p2ch11.model_luna import LunaModel # 引き続きp2ch11のモデルを使用
 
 log = logging.getLogger(__name__)
 # log.setLevel(logging.WARN)
@@ -38,13 +38,11 @@ class LunaPrepCacheApp:
             default=1024,
             type=int,
         )
-
         parser.add_argument('--num-workers',
             help='Number of worker processes for background data loading',
             default=8,
             type=int,
         )
-
         # データセットディレクトリの指定
         parser.add_argument('--datasetdir',
             help="Luna dataset directory",
@@ -59,7 +57,7 @@ class LunaPrepCacheApp:
         self.prep_dl = DataLoader(
             LunaDataset(
                 datasetdir=self.cli_args.datasetdir,
-                series_uid=True,
+                sortby_str='series_uid',
             ),
             batch_size=self.cli_args.batch_size,
             num_workers=self.cli_args.num_workers,

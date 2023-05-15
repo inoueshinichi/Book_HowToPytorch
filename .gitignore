@@ -2,10 +2,10 @@
 .vscode/
 __pycache__/
 dlwpt-code-master/
-AI_Data/
 build/
-p2_ct_project/p2_ch10/__pycache__/
-p2_ct_project/p2_ch11/__pycache__/
+p2_ct_project/p2ch10/__pycache__/
+p2_ct_project/p2ch11/__pycache__/
+p2_ct_project/p2ch12/__pycache__/
 data-unversioned/
 runs/
 

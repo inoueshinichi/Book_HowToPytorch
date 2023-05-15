@@ -1,4 +1,4 @@
-"""LunaTrainingApp
+"""ModLunaTrainingApp
 """
 
 import os
@@ -23,13 +23,13 @@ from torch.utils.data import DataLoader
 
 from util.util import enumerateWithEstimate
 from util.logconf import logging
-from p2ch10.dataset_luna import LunaDataset
-from p2ch11.model_luna import LunaModel
+from p2ch12.mod_dataset_luna import LunaDataset # p2ch12のLunaDatasetクラスを使用する
+from p2ch11.model_luna import LunaModel # モデルはp2ch11のまま
 
 log = logging.getLogger(__name__)
 # log.setLevel(logging.WARN)
 log.setLevel(logging.INFO)
-log.setLevel(logging.DEBUG)
+# log.setLevel(logging.DEBUG)
 
 # Used for computeBatchLoss and logMetrics to index into metrics_t/metrics_a
 METRICS_LABEL_NDX=0
@@ -44,34 +44,83 @@ class LunaTrainingApp:
             sys_argv = sys.argv[1:]
 
         parser = argparse.ArgumentParser()
+
+        parser.add_argument('--batch-size',
+            help='Batch size to use for training',
+            default=32,
+            type=int,
+        )
+
         parser.add_argument('--num-workers',
             help='Number of worker processes for background data loading',
             default=8,
             type=int,
         )
-        parser.add_argument('--batch-size',
-            help='Batch size to use for training',
-            default=32,
-            type=int,    
-        )
+
         parser.add_argument('--epochs',
             help='Number of epochs to train for',
             default=1,
             type=int,
         )
+
         parser.add_argument('--tb-prefix',
-            help='Data prefix to use for Tensorboard run. Defaults to chapter',
-            default='p2ch11',    
+            default='p2ch12',
+            help="Data prefix to use for Tensorboard run. Defaults to chapter.",
         )
-        parser.add_argument('comment',
-            help='Comment suffix for Tensorboard run',
-            nargs='?',
-            default='dwlpt',
+
+        parser.add_argument('--balanced',
+            help="Balance the training data to half positive, half negative.",
+            action='store_true',
+            default=False,
         )
+
+        # データ拡張
+        parser.add_argument('--augmented',
+            help="Augment the training data.",
+            action='store_true',
+            default=False,
+        )
+
+        parser.add_argument('--augment-flip',
+            help="Augment the training data by randomly flipping the data left-right, up-down, and front-back.",
+            action='store_true',
+            default=False,
+        )
+
+        parser.add_argument('--augment-offset',
+            help="Augment the training data by randomly offsetting the data slightly along the X and Y axes.",
+            action='store_true',
+            default=False,
+        )
+
+        parser.add_argument('--augment-scale',
+            help="Augment the training data by randomly increasing or decreasing the size of the candidate.",
+            action='store_true',
+            default=False,
+        )
+
+        parser.add_argument('--augment-rotate',
+            help="Augment the training data by randomly rotating the data around the head-foot axis.",
+            action='store_true',
+            default=False,
+        )
+
+        parser.add_argument('--augment-noise',
+            help="Augment the training data by randomly adding noise to the data.",
+            action='store_true',
+            default=False,
+        )
+
         # データセットディレクトリの指定
         parser.add_argument('--datasetdir',
             help="Luna dataset directory",
             default='E:/Luna16'
+        )
+
+        parser.add_argument('comment',
+            help="Comment suffix for Tensorboard run.",
+            nargs='?',
+            default='dlwpt',
         )
 
         self.cli_args = parser.parse_args(sys_argv)
@@ -81,11 +130,25 @@ class LunaTrainingApp:
         self.val_writer = None
         self.totalTrainingSamples_count = 0
 
+        # データ拡張 (パラメータは取り組み対象の経験則)
+        self.augmentation_dict = {}
+        if self.cli_args.augmented or self.cli_args.augment_flip:
+            self.augmentation_dict['flip'] = True
+        if self.cli_args.augmented or self.cli_args.augment_offset:
+            self.augmentation_dict['offset'] = 0.1
+        if self.cli_args.augmented or self.cli_args.augment_scale:
+            self.augmentation_dict['scale'] = 0.2
+        if self.cli_args.augmented or self.cli_args.augment_rotate:
+            self.augmentation_dict['rotate'] = True
+        if self.cli_args.augmented or self.cli_args.augment_noise:
+            self.augmentation_dict['noise'] = 25.0
+
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
 
         self.model = self.initModel()
         self.optimizer = self.initOptimizer()
+
 
     def initModel(self):
         model = LunaModel()
@@ -95,16 +158,21 @@ class LunaTrainingApp:
                 model = nn.DataParallel(model)
             model = model.to(self.device)
         return model
-    
+
+
     def initOptimizer(self):
         return SGD(self.model.parameters(), lr=0.001, momentum=0.99)
         # return Adam(self.model_parameters())
-    
+
+
     def initTrainDl(self):
         datasetdir = self.cli_args.datasetdir # データセットディレクトリ
         train_ds = LunaDataset(datasetdir=datasetdir, 
-                               val_stride=0, 
-                               isValSet_bool=False)
+                               val_stride=10, 
+                               isValSet_bool=False,
+                               ratio_int=int(self.cli_args.balanced),
+                               augmentation_dict=self.augmentation_dict,
+        )
 
         batch_size = self.cli_args.batch_size
         if self.use_cuda:
@@ -119,6 +187,7 @@ class LunaTrainingApp:
 
         return train_dl
     
+
     def initValDl(self):
         datasetdir = self.cli_args.datasetdir # データセットディレクトリ
         val_ds = LunaDataset(datasetdir=datasetdir,
@@ -138,6 +207,7 @@ class LunaTrainingApp:
 
         return val_dl
     
+
     def initTensorboardWriters(self):
         if self.trn_writer is None:
             log_dir = os.path.join('runs', self.cli_args.tb_prefix, self.time_str)
@@ -150,11 +220,13 @@ class LunaTrainingApp:
                 log_dir=log_dir + "-val_cls-" + self.cli_args.comment
             )
 
+
     def main(self):
         log.info("Starting {}, {}".format(type(self).__name__, self.cli_args))
 
         train_dl = self.initTrainDl()
         val_dl = self.initValDl()
+        batch_fed_to_graph_for_tensorboard = None # tensorboard用グラフに与える入力
 
         for epoch_ndx in range(1, self.cli_args.epochs + 1):
 
@@ -173,12 +245,24 @@ class LunaTrainingApp:
             valMetrics_t = self.doValidation(epoch_ndx, val_dl)
             self.logMetrics(epoch_ndx, 'val', valMetrics_t)
 
+            # # This is for adding the model graph to TensorBoard.
+            # if epoch_ndx == 1:
+            #     with torch.no_grad():
+            #         model = LunaModel()
+            #         self.trn_writer.add_graph(model, batch_fed_to_graph_for_tensorboard, verbose=True)
+            #         # self.trn_writer.close()
+
         if hasattr(self, 'trn_writer'):
             self.trn_writer.close()
             self.val_writer.close()
+    
 
     def doTraining(self, epoch_ndx, train_dl):
+
         self.model.train()
+
+        # データセットをシャッフル
+        train_dl.dataset.shuffleSamples()
 
         # 評価指標用にからの配列を初期化
         trnMetrics_g = torch.zeros(
@@ -186,6 +270,8 @@ class LunaTrainingApp:
             len(train_dl.dataset),
             device=self.device,
         )
+
+        global fed_batch_for_tensorboard_graph
 
         # 終了時間予測付きのバッチループ作成
         batch_iter = enumerateWithEstimate(
@@ -208,17 +294,14 @@ class LunaTrainingApp:
             loss_var.backward()
             self.optimizer.step()
 
-            # # This is for adding the model graph to TensorBoard.
-            # if epoch_ndx == 1 and batch_ndx == 0:
-            #     with torch.no_grad():
-            #         model = LunaModel()
-            #         self.trn_writer.add_graph(model, batch_tup[0], verbose=True)
-            #         self.trn_writer.close()
+            if epoch_ndx == 1 and batch_ndx == 0:
+                batch_fed_to_graph_for_tensorboard = batch_tup[0]
 
         self.totalTrainingSamples_count += len(train_dl.dataset)
 
         return trnMetrics_g.to('cpu')
     
+
     def doValidation(self, epoch_ndx, val_dl):
         with torch.no_grad():
             self.model.eval()
@@ -243,8 +326,14 @@ class LunaTrainingApp:
                 )
 
         return valMetrics_g.to('cpu')
+    
 
-    def computeBatchLoss(self, batch_ndx, batch_tup, batch_size, metrics_g):
+    def computeBatchLoss(self, 
+                         batch_ndx, 
+                         batch_tup, 
+                         batch_size, 
+                         metrics_g):
+        
         input_t, label_t, _series_list, _center_list = batch_tup
 
         input_g = input_t.to(self.device, non_blocking=True)
@@ -264,7 +353,7 @@ class LunaTrainingApp:
 
         # 勾配を必要とする指標がないのでデタッチして, 計算グラフから切り離す.
         metrics_g[METRICS_LABEL_NDX, start_ndx:end_ndx] = label_g[:,1].detach()
-        metrics_g[METRICS_PRED_NDX, start_ndx:end_ndx] = probability_g[:,1].detach() # 陽性尤度
+        metrics_g[METRICS_PRED_NDX, start_ndx:end_ndx] = probability_g[:,1].detach()
         metrics_g[METRICS_LOSS_NDX, start_ndx:end_ndx] = loss_g.detach()
 
         return loss_g.mean() # サンプル毎の損失を1バッチ分に平均化
@@ -301,7 +390,7 @@ class LunaTrainingApp:
         metrics_dict['loss/neg'] = metrics_t[METRICS_LOSS_NDX, negLabel_mask].mean()
         metrics_dict['loss/pos'] = metrics_t[METRICS_LOSS_NDX, posLabel_mask].mean()
 
-        metrics_dict['correct/all'] = (pos_correct + neg_correct) / np.float32(metrics_t.shape[1]) * 100
+        metrics_dict['correct/all'] = (pos_correct + neg_correct) / np.float(metrics_t.shape[1]) * 100
         metrics_dict['correct/neg'] = neg_correct / np.float32(neg_count) * 100
         metrics_dict['correct/pos'] = pos_correct / np.float32(pos_count) * 100
 
@@ -372,12 +461,12 @@ class LunaTrainingApp:
         posHist_mask = posLabel_mask & (metrics_t[METRICS_PRED_NDX] < 0.99) # 陽性サンプル : 結節である
 
         if negHist_mask.any():
-            sum_pos_prob_ls_001= np.sum(metrics_t[METRICS_PRED_NDX] > 0.01)
-            print("sum(metrics_[METRICS_PRED_NDX] > 0.01) : 陽性尤度が>0.01な推論サンプル数", sum_pos_prob_ls_001)
-            print("negHist_mask\n", negHist_mask)
-            print("negHist_mask.shape", negHist_mask.shape)
-            print("metrics_t[METRICS_PRED_NDX, negHist_mask]\n", metrics_t[METRICS_PRED_NDX, negHist_mask])
-            print("metrics_t[METRICS_PRED_NDX, negHist_mask].shape", metrics_t[METRICS_PRED_NDX, negHist_mask].shape)
+            # sum_pos_prob_ls_001= torch.sum((metrics_t[METRICS_PRED_NDX] > 0.01).to(torch.int64))
+            # print("sum(metrics_[METRICS_PRED_NDX] > 0.01) : 陽性尤度が>0.01な推論サンプル数", sum_pos_prob_ls_001)      
+            # print("negHist_mask\n", negHist_mask)
+            # print("negHist_mask.shape", negHist_mask.shape)
+            # print("metrics_t[METRICS_PRED_NDX, negHist_mask]\n", metrics_t[METRICS_PRED_NDX, negHist_mask])
+            # print("metrics_t[METRICS_PRED_NDX, negHist_mask].shape", metrics_t[METRICS_PRED_NDX, negHist_mask].shape)
 
             writer.add_histogram(
                 'is_neg',
@@ -387,12 +476,12 @@ class LunaTrainingApp:
             )
 
         if posHist_mask.any():
-            sum_pos_prob_gt_099 = np.sum(metrics_t[METRICS_PRED_NDX] < 0.99)
-            print("sum(metrics_[METRICS_PRED_NDX] < 0.99) : 陽性尤度が<0.99な推論サンプル数", sum_pos_prob_gt_099)
-            print("posHist_mask\n", posHist_mask)
-            print("posHist_mask.shape", posHist_mask.shape)
-            print("metrics_t[METRICS_PRED_NDX, posHist_mask]\n", metrics_t[METRICS_PRED_NDX, posHist_mask])
-            print("metrics_t[METRICS_PRED_NDX, posHist_mask].shape", metrics_t[METRICS_PRED_NDX, posHist_mask].shape)
+            # sum_pos_prob_gt_099 = torch.sum((metrics_t[METRICS_PRED_NDX] < 0.99).to(torch.int64))
+            # print("sum(metrics_[METRICS_PRED_NDX] < 0.99) : 陽性尤度が<0.99な推論サンプル数", sum_pos_prob_gt_099)
+            # print("posHist_mask\n", posHist_mask)
+            # print("posHist_mask.shape", posHist_mask.shape)
+            # print("metrics_t[METRICS_PRED_NDX, posHist_mask]\n", metrics_t[METRICS_PRED_NDX, posHist_mask])
+            # print("metrics_t[METRICS_PRED_NDX, posHist_mask].shape", metrics_t[METRICS_PRED_NDX, posHist_mask].shape)
 
             writer.add_histogram(
                 'is_pos',
@@ -435,4 +524,3 @@ class LunaTrainingApp:
 
 if __name__ == "__main__":
     LunaTrainingApp().main()
-
