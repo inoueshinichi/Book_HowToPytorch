@@ -85,8 +85,9 @@ class GzipDisk(Disk):
         return value
     
 
-def getCache(scope_str):
-    return FanoutCache('data-unversioned/cache/' + scope_str,
+def getCache(cachedir : str, version : str, scope_str : str):
+    caching_path = cachedir + f"/data-{version}/cache/" + scope_str
+    return FanoutCache(caching_path,
                        disk=GzipDisk,
                        shards=64,
                        timeout=1,

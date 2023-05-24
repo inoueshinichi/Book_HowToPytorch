@@ -43,10 +43,15 @@ class LunaPrepCacheApp:
             default=8,
             type=int,
         )
-        # データセットディレクトリの指定
-        parser.add_argument('--datasetdir',
-            help="Luna dataset directory",
+        # 生データセットディレクトリの指定
+        parser.add_argument('--raw_datasetdir',
+            help="Luna raw dataset directory",
             default='E:/Luna16'
+        )
+        # キャッシュデータセットディレクトリの指定
+        parser.add_argument("--cache_datasetdir",
+            help="Luna cache dataset directory",
+            default="F:/Luna16"
         )
 
         self.cli_args = parser.parse_args(sys_argv)
@@ -56,7 +61,8 @@ class LunaPrepCacheApp:
 
         self.prep_dl = DataLoader(
             LunaDataset(
-                datasetdir=self.cli_args.datasetdir,
+                raw_datasetdir=self.cli_args.raw_datasetdir,
+                cache_datasetdir=self.cli_args.cache_datasetdir,
                 sortby_str='series_uid',
             ),
             batch_size=self.cli_args.batch_size,
