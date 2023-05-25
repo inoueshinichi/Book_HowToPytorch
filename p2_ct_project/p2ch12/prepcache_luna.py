@@ -27,6 +27,7 @@ log.setLevel(logging.INFO)
 
 
 class LunaPrepCacheApp:
+
     @classmethod
     def __init__(self, sys_argv=None):
         if sys_argv is None:
@@ -43,17 +44,12 @@ class LunaPrepCacheApp:
             default=8,
             type=int,
         )
-        # 生データセットディレクトリの指定
-        parser.add_argument('--raw_datasetdir',
+        # データセットディレクトリの指定
+        parser.add_argument('--datasetdir',
             help="Luna raw dataset directory",
             default='E:/Luna16'
         )
-        # キャッシュデータセットディレクトリの指定
-        parser.add_argument("--cache_datasetdir",
-            help="Luna cache dataset directory",
-            default="F:/Luna16"
-        )
-
+       
         self.cli_args = parser.parse_args(sys_argv)
 
     def main(self):
@@ -61,8 +57,7 @@ class LunaPrepCacheApp:
 
         self.prep_dl = DataLoader(
             LunaDataset(
-                raw_datasetdir=self.cli_args.raw_datasetdir,
-                cache_datasetdir=self.cli_args.cache_datasetdir,
+                raw_datasetdir=self.cli_args.datasetdir,
                 sortby_str='series_uid',
             ),
             batch_size=self.cli_args.batch_size,

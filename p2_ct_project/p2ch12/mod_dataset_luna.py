@@ -36,20 +36,16 @@ log = logging.getLogger(__name__)
 # log.setLevel(logging.INFO)
 log.setLevel(logging.DEBUG)
 
+# diskcacheのタグ
+tag_version = "unversioned"
+
 # 生データセットのディスクキャッシュ
-raw_cache = getCache(
-                cachedir="F:/Luna16", 
-                version="unversioned", 
-                scope_str="part2ch12_raw",
-                )
+raw_cache = getCache(cachedir="F:/Luna16", scope_str="p2ch12_raw")
 
 # 結節の状態(分類対象), 直径, 識別子, 結節候補の中心座標
 CandidateInfoTuple = namedtuple(
     'CandidateInfoTuple',
-    'isNodule_bool, \
-    diameter_mm, \
-    series_uid, \
-    center_xyz',
+    ['isNodule_bool', 'diameter_mm', 'series_uid', 'center_xyz']
     )
 
 
@@ -58,15 +54,13 @@ CandidateInfoTuple = namedtuple(
 def getCandidateInfoList(
     requireOnDisk_bool=True, 
     raw_datasetdir : str = "",
-    cache_datasetdir : str = "",
-    version : str = "unversioned",
     ):
     # We construct a set with all series_uids that are present on disk.
     # This will let us use the data, even if we haven't downloaded all of
     # the subsets yet.
 
     # 生データ(3D) cached
-    regex_mhd_path = cache_datasetdir + f"/data-{version}" + "/subset*/*.mhd"
+    regex_mhd_path = raw_datasetdir + "/subset*/*.mhd"
     mhd_list = glob.glob(regex_mhd_path)
     presentOnDisk_set = { os.path.split(p)[-1][:-4] for p in mhd_list } # filenames
 
@@ -130,16 +124,15 @@ def getCandidateInfoList(
 
 # CTインスタンス
 class Ct:
+
     # series_uidでデータを指定
     def __init__(
             self, 
             series_uid, 
             raw_datasetdir : str, 
-            cache_datasetdir : str,
-            version : str = "unversioned",
             ):
         
-        regex_mhd_path = cache_datasetdir + "/data-{}/subset*/{}.mhd".format(version, series_uid)
+        regex_mhd_path = raw_datasetdir + "/subset*/{}.mhd".format(series_uid)
         mhd_path = glob.glob(regex_mhd_path)[0]
 
         # sitk.ReadImageは, 与えられた*.mhdファイルに加えて, *.rawファイルも暗黙的に使用する.
@@ -158,6 +151,7 @@ class Ct:
         self.origin_xyz = XyzTuple(*ct_mhd.GetOrigin())
         self.vxSize_xyz = XyzTuple(*ct_mhd.GetSpacing())
         self.direction_a = np.array(ct_mhd.GetDirection()).reshape(3, 3)
+
 
     def getRawCandidate(
                     self, 
@@ -198,35 +192,29 @@ class Ct:
 
         return ct_chunk, center_irc
 
-
+# インメモリキャッシュ
 @functools.lru_cache(1, typed=True)
 def getCt(
     series_uid, 
     raw_datasetdir : str,
-    cache_datasetdir : str,
-    version : str = "unversioned",
     ):
     return Ct(series_uid=series_uid, 
               raw_datasetdir=raw_datasetdir, 
-              cache_datasetdir=cache_datasetdir,
-              version=version)
+              )
 
 
-@raw_cache.memoize(typed=True)
+# diskcache.FanoutCache(DBへInterface)に関数・引数・戻り値を登録する
+@raw_cache.memoize(typed=True, tag=tag_version)
 def getCtRawCandidate(
         raw_datasetdir : str, 
-        cache_datasetdir : str, 
         series_uid, 
         center_xyz, 
         width_irc,
-        version : str = "unversioned",
         ):
     
     ct = getCt(
             series_uid=series_uid, 
             raw_datasetdir=raw_datasetdir, 
-            cache_datasetdir=cache_datasetdir,
-            version=version,
             )
     
     ct_chunk, center_irc = ct.getRawCandidate(center_xyz, width_irc)
@@ -236,31 +224,26 @@ def getCtRawCandidate(
 '''データ拡張関数'''
 def getCtAugmentedCandidate(
         raw_datasetdir : str,
-        cache_datasetdir : str,
         augmentation_dict, 
         series_uid, 
         center_xyz, 
         width_irc, 
         use_cache=True,
-        version : str = "unversioned",
 ):
     if use_cache:
+        # ディスクキャッシュ済みのcallableをinvoke
         ct_chunk, center_irc = getCtRawCandidate(
                                     raw_datasetdir=raw_datasetdir,
-                                    cache_datasetdir=cache_datasetdir,
                                     series_uid=series_uid,
                                     center_xyz=center_xyz,
                                     width_irc=width_irc,
-                                    version=version,
                                     )
             
     else:
         ct = getCt(
                 series_uid=series_uid,
                 raw_datasetdir=raw_datasetdir,
-                cache_datasetdir=cache_datasetdir,
-                version=version
-        )
+                )
 
         ct_chunk, center_irc = ct.getRawCandidate(center_xyz, width_irc)
 
@@ -337,8 +320,6 @@ class LunaDataset(Dataset):
 
     def __init__(self,
                  raw_datasetdir : str,
-                 cache_datasetdir : str,
-                 version : str = "unversioned",
                  val_stride=0,
                  isValSet_bool=None,
                  series_uid=None,
@@ -349,8 +330,6 @@ class LunaDataset(Dataset):
                  ):
         
         self.raw_datasetdir = raw_datasetdir
-        self.cache_datasetdir = cache_datasetdir
-        self.version = version
         self.ratio_int = ratio_int
         self.augmentation_dict = augmentation_dict
 
@@ -360,8 +339,6 @@ class LunaDataset(Dataset):
         else:
             self.candidateInfo_list = copy.copy(getCandidateInfoList(
                                                     raw_datasetdir=self.raw_datasetdir, 
-                                                    cache_datasetdir=self.cache_datasetdir,
-                                                    version=self.version,
                                                     )
                                                 )
             self.use_cache = True
@@ -460,42 +437,39 @@ class LunaDataset(Dataset):
 
         width_irc = (32, 48, 48)
 
+        # @note ディスクキャッシュに登録済みを呼び出す.
         # @warning データ拡張を行う前にキャッシュを作成すること.
         # さもないと, データ拡張が1回しか行われないことになる.
         # 最初のデータ拡張の結果をキャッシュしてしまうため.
         candidate_a, center_irc = getCtRawCandidate(
             raw_datasetdir = self.raw_datasetdir,
-            cache_datasetdir = self.cache_datasetdir,
             series_uid = candidateInfo_tup.series_uid,
             center_xyz = candidateInfo_tup.center_xyz,
             width_irc = width_irc,
-            version = self.version,
-        )
+            )
 
         candidate_t = torch.from_numpy(candidate_a)
         candidate_t = candidate_t.to(torch.float32)
         candidate_t = candidate_t.unsqueeze(0)
 
+        '''データ拡張'''
         if self.augmentation_dict:
             candidate_t, center_irc = getCtAugmentedCandidate(
                 raw_datasetdir=self.raw_datasetdir,
-                cache_datasetdir=self.cache_datasetdir,
                 augmentation_dict=self.augmentation_dict,
                 series_uid = candidateInfo_tup.series_uid,
                 center_xyz = candidateInfo_tup.center_xyz,
                 width_irc = width_irc,
                 use_cache = self.use_cache,
-                version = self.version,
-            )
+                )
         elif self.use_cache:
+            # ディスクキャッシュ済みのcallableをinvoke
             candidate_a, center_irc = getCtRawCandidate(
                 raw_datasetdir=self.raw_datasetdir,
-                cache_datasetdir=self.cache_datasetdir,
                 series_uid = candidateInfo_tup.series_uid,
                 center_xyz = candidateInfo_tup.center_xyz,
                 width_irc = width_irc,
-                version = self.version,
-            )
+                )
             candidate_t = torch.from_numpy(candidate_a).to(torch.float32)
             candidate_t = candidate_t.unsqueeze(0)
         else:

@@ -35,27 +35,27 @@ raw_cache = getCache("F:/Luna16", "p2ch13_raw")
 # 生密度, 密度, 身体, 空気, 生結節候補, 結節候補, 肺, 良性結節, 悪性結節
 MaskTuple = namedtuple(
     "MaskTuple",
-    "raw_dense_mask, \
-    dense_mask, \
-    body_mask, \
-    air_mask, \
-    raw_candidate_mask, \
-    candidate_mask, \
-    lung_mask, \
-    neg_mask, \
-    pos_mask"
+    ["raw_dense_mask",
+    "dense_mask",
+    "body_mask",
+    "air_mask",
+    "raw_candidate_mask",
+    "candidate_mask",
+    "lung_mask",
+    "neg_mask",
+    "pos_mas"]
 )
 
 # 結節候補の状態
 # 結節フラグ, アノテーションフラグ, 悪性腫瘍フラグ,  直径, 識別子, 結節候補の中心座標
 CandidateInfoTuple = namedtuple(
     "CandidteInfoTuple",
-    "isNodule_bool, \
-    hasAnnotation_bool, \
-    isMal_bool, \
-    diameter_mm, \
-    series_uid, \
-    center_xyz"
+    ["isNodule_bool",
+    "hasAnnotation_bool",
+    "isMal_bool",
+    "diameter_mm",
+    "series_uid",
+    "center_xyz"]
 )
 
 # インメモリでキャッシングを行う標準的なライブラリ
@@ -64,14 +64,13 @@ CandidateInfoTuple = namedtuple(
 def getCandidateInfoList(
     requireOnDisk_bool=True, 
     raw_datasetdir : str = "", 
-    cache_datasetdir : str = "",
     ):
     # We construct a set with all series_uids that are present on disk.
     # This will let us use the data, even if we haven't downloaded all of
     # the subsets yet.
 
     # キャッシングした生データ(3D)
-    regex_mhd_path = cache_datasetdir + "/subset*/*.mhd"
+    regex_mhd_path = raw_datasetdir + "/subset*/*.mhd"
     mhd_list = glob.glob(regex_mhd_path)
     presentOnDisk_set = { os.path.split(p)[-1][:-4] for p in mhd_list } # filenames
 
@@ -131,15 +130,16 @@ def getCandidateInfoList(
     # (結節のサイズの情報を持たない)結節でないサンプルが続くことになる.
     return candidateInfo_list
 
-
+# インメモリキャッシュ
 @functools.lru_cache(1)
 def getCandidateInfoDict(
     requireOnDisk_bool=True, 
     raw_datasetdir : str = "", 
-    cache_datasetdir : str = "",
     ):
     candidateInfo_list = getCandidateInfoList(
-        requireOnDisk_bool, raw_datasetdir, cache_datasetdir)
+                            requireOnDisk_bool, 
+                            raw_datasetdir
+                            )
     
     candidateInfo_dict = {}
 

@@ -10,7 +10,7 @@ import copy
 import csv
 import functools
 import glob
-from collections import namedtuple
+import collections
 
 import SimpleITK as sitk
 import numpy as np
@@ -25,30 +25,35 @@ log = logging.getLogger(__name__)
 # log.setLevel(logging.INFO)
 log.setLevel(logging.DEBUG)
 
-raw_cache = getCache('part2ch10_raw')
+# diskcacheのタグ
+tag_version = "unversioned"
+
+raw_cache = getCache("F:/Luna16", "p2ch10_raw")
 
 # 結節の状態(分類対象), 直径, 識別子, 結節候補の中心座標
-CandidateInfoTuple = namedtuple(
+CandidateInfoTuple = collections.namedtuple(
     'CandidateInfoTuple',
-    'isNodule_bool, diameter_mm, series_uid, center_xyz',
+    ['isNodule_bool', 'diameter_mm', 'series_uid', 'center_xyz']
 )
 
 
 # Make CandidateInfoTuple with Helper 関数 for loading luna dataset
 @functools.lru_cache(1) # インメモリでキャッシングを行う標準的なライブラリ : getCandidateInfoList関数の結果をメモリキャッシュに保存する
-def getCandidateInfoList(requireOnDisk_bool=True, datasetdir: str = ""):
+def getCandidateInfoList(requireOnDisk_bool=True, 
+                         raw_datasetdir : str = "", 
+                         ):
     # We construct a set with all series_uids that are present on disk.
     # This will let us use the data, even if we haven't downloaded all of
     # the subsets yet.
 
     # 生データ(3D)
-    regex_mhd_path = datasetdir + "/subset*/*.mhd"
+    regex_mhd_path = raw_datasetdir + "/subset*/*.mhd"
     mhd_list = glob.glob(regex_mhd_path)
     presentOnDisk_set = { os.path.split(p)[-1][:-4] for p in mhd_list } # filenames
 
     # アノテーション(annotations.csv)から直径の情報をマージする
     diameter_dict = {}
-    anno_path = datasetdir + "/annotations.csv"
+    anno_path = raw_datasetdir + "/annotations.csv"
     with open(anno_path, 'r') as f:
         for row in list(csv.reader(f))[1:]:
             series_uid = row[0]
@@ -63,7 +68,7 @@ def getCandidateInfoList(requireOnDisk_bool=True, datasetdir: str = ""):
     # presetOnDisk_setに存在する`series_uid`のみを扱う
     # AnnotationとCandidateで各中心座標(x,y,z)の距離がAnnotationDiameter_mmの1/4以下のもののみを扱う
     candidateInfo_list = []
-    cand_path = datasetdir + "/candidates.csv"
+    cand_path = raw_datasetdir + "/candidates.csv"
     with open(cand_path, 'r') as f:
         for row in list(csv.reader(f))[1:]:
             series_uid = row[0]
@@ -106,9 +111,10 @@ def getCandidateInfoList(requireOnDisk_bool=True, datasetdir: str = ""):
 
 # CTインスタンス
 class Ct:
+
     # series_uidでデータを指定
-    def __init__(self, series_uid, datasetdir:str):
-        regex_mhd_path = datasetdir + "/subset*/{}.mhd".format(series_uid)
+    def __init__(self, series_uid, raw_datasetdir : str):
+        regex_mhd_path = raw_datasetdir + "/subset*/{}.mhd".format(series_uid)
         mhd_path = glob.glob(regex_mhd_path)[0]
 
         # sitk.ReadImageは, 与えられた*.mhdファイルに加えて, *.rawファイルも暗黙的に使用する.
@@ -127,6 +133,7 @@ class Ct:
         self.origin_xyz = XyzTuple(*ct_mhd.GetOrigin())
         self.vxSize_xyz = XyzTuple(*ct_mhd.GetSpacing())
         self.direction_a = np.array(ct_mhd.GetDirection()).reshape(3, 3)
+
 
     def getRawCandidate(self, center_xyz, width_irc):
         center_irc = xyz2irc(
@@ -164,13 +171,14 @@ class Ct:
 
 
 @functools.lru_cache(1, typed=True)
-def getCt(series_uid, datasetdir:str):
-    return Ct(series_uid, datasetdir=datasetdir)
+def getCt(series_uid, raw_datasetdir:str):
+    return Ct(series_uid, raw_datasetdir=raw_datasetdir)
 
 
-@raw_cache.memoize(typed=True)
-def getCtRawCandidate(datasetdir:str, series_uid, center_xyz, width_irc):
-    ct = getCt(series_uid, datasetdir)
+# @note diskcacheのdbに登録される
+@raw_cache.memoize(typed=True, tag=tag_version)
+def getCtRawCandidate(raw_datasetdir : str, series_uid, center_xyz, width_irc):
+    ct = getCt(series_uid, raw_datasetdir)
     ct_chunk, center_irc = ct.getRawCandidate(center_xyz, width_irc)
     return ct_chunk, center_irc
 
@@ -183,12 +191,12 @@ from torch.utils.data import Dataset
 class LunaDataset(Dataset):
 
     def __init__(self,
-                 datasetdir:str,
+                 raw_datasetdir : str,
                  val_stride=0,
                  isValSet_bool=None,
                  series_uid=None):
-        self.datasetdir = datasetdir
-        self.candidateInfo_list = copy.copy(getCandidateInfoList(datasetdir=self.datasetdir))
+        self.raw_datasetdir = raw_datasetdir
+        self.candidateInfo_list = copy.copy(getCandidateInfoList(raw_datasetdir=self.raw_datasetdir))
 
         if series_uid:
             self.candidateInfo_list = [
@@ -216,8 +224,9 @@ class LunaDataset(Dataset):
         candidateInfo_tup = self.candidateInfo_list[ndx]
         width_irc = (32, 48, 48)
 
+        # @note diskcacheに登録されたcallableオブジェクトがinvokeされる
         candidate_a, center_irc = getCtRawCandidate(
-            self.datasetdir,
+            self.raw_datasetdir,
             candidateInfo_tup.series_uid,
             candidateInfo_tup.center_xyz,
             width_irc,

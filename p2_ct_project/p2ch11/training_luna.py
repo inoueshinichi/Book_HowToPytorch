@@ -70,7 +70,7 @@ class LunaTrainingApp:
         )
         # データセットディレクトリの指定
         parser.add_argument('--datasetdir',
-            help="Luna dataset directory",
+            help="Luna raw dataset directory",
             default='E:/Luna16'
         )
 
@@ -102,7 +102,7 @@ class LunaTrainingApp:
     
     def initTrainDl(self):
         datasetdir = self.cli_args.datasetdir # データセットディレクトリ
-        train_ds = LunaDataset(datasetdir=datasetdir, 
+        train_ds = LunaDataset(raw_datasetdir=datasetdir, 
                                val_stride=0, 
                                isValSet_bool=False)
 
@@ -121,7 +121,7 @@ class LunaTrainingApp:
     
     def initValDl(self):
         datasetdir = self.cli_args.datasetdir # データセットディレクトリ
-        val_ds = LunaDataset(datasetdir=datasetdir,
+        val_ds = LunaDataset(raw_datasetdir=datasetdir,
                              val_stride=10, 
                              isValSet_bool=True)
 

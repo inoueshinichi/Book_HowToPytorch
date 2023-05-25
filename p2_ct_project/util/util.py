@@ -16,6 +16,7 @@ log.setLevel(logging.DEBUG)
 IrcTuple = collections.namedtuple('IrcTuple', ['index', 'row', 'col'])
 XyzTuple = collections.namedtuple('XyzTuple', ['x', 'y', 'z'])
 
+
 def irc2xyz(coord_irc, origin_xyz, vxSize_xyz, direction_a):
     cir_a = np.array(coord_irc)[::-1]
     origin_a = np.array(origin_xyz)
@@ -24,6 +25,7 @@ def irc2xyz(coord_irc, origin_xyz, vxSize_xyz, direction_a):
     # coord_xyz = (direction_a @ (idx * vxSize_a)) + origin_a
     return XyzTuple(*coord_xyz)
 
+
 def xyz2irc(coord_xyz, origin_xyz, vxSize_xyz, direction_a):
     origin_a = np.array(origin_xyz)
     vxSize_a = np.array(vxSize_xyz)
@@ -31,6 +33,7 @@ def xyz2irc(coord_xyz, origin_xyz, vxSize_xyz, direction_a):
     cri_a = ((coord_a - origin_a) @ np.linalg.inv(direction_a)) / vxSize_a
     cri_a = np.round(cri_a)
     return IrcTuple(int(cri_a[2]), int(cri_a[1]), int(cri_a[0]))
+
 
 def importstr(module_str, from_=None):
     """
@@ -56,6 +59,7 @@ def importstr(module_str, from_=None):
         except:
             raise ImportError('{}.{}'.format(module_str, from_))
     return module
+
 
 # class dotdict(dict):
 #     '''dict where key can be access as attribute d.key -> d[key]'''
@@ -108,6 +112,7 @@ def importstr(module_str, from_=None):
 #         # override dict.copy()
 #         return dotdict(self)
 
+
 def prhist(ary, prefix_str=None, **kwargs):
     if prefix_str is None:
         prefix_str = ''
@@ -118,6 +123,7 @@ def prhist(ary, prefix_str=None, **kwargs):
     for i in range(count_ary.shape[0]):
         print("{}{:-8.2f}".format(prefix_str, bins_ary[i]), "{:-10}".format(count_ary[i]))
     print("{}{:-8.2f}".format(prefix_str, bins_ary[-1]))
+
 
 # def dumpCuda():
 #     # small_count = 0
@@ -139,6 +145,7 @@ def prhist(ary, prefix_str=None, **kwargs):
 #     for size, count in sorted(size2count_dict.items(), key=lambda sc: (size2bytes_dict[sc[0]] * sc[1], sc[1], sc[0])):
 #         print('{:4}x'.format(count), '{:10,}'.format(size2bytes_dict[size]), size)
 #     print('{:10,}'.format(total_bytes), "total bytes")
+
 
 def enumerateWithEstimate(
         iter,
