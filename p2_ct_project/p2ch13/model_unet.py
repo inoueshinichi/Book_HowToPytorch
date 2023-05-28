@@ -46,7 +46,7 @@ class UNetWrapper(nn.Module):
             nn.Conv2d,
             nn.Conv3d,
             nn.ConvTranspose2d,
-            nn.Convtranspose3d,
+            nn.ConvTranspose3d,
             nn.Linear,
         }
         for m in self.modules():
@@ -82,7 +82,7 @@ class SegmentationAugmentation(nn.Module):
 
 
     def forward(self, input_g, label_g):
-        transform_t = self._build2TransformMatrix()
+        transform_t = self._build2dTransformMatrix()
         transform_t = transform_t.expand(input_g.shape[0], -1, -1)
         transform_t = transform_t.to(input_g.device, torch.float32)
         affine_t = F.affine_grid(
