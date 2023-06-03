@@ -415,8 +415,127 @@ class Luna2dSegmentationDataset(Dataset):
             context_ndx = min(context_ndx, ct.hu_a.shape[0] - 1)
             ct_t[i] = torch.from_numpy(ct.hu_a[context_ndx].astype(np.float32))
 
-        
+        # CTs are natively expressed in https://en.wikipedia.org/wiki/Hounsfield_scale
+        # HU are scaled oddly, with 0 g/cc (air, approximately) being -1000 and 1 g/cc (water) being 0.
+        # The lower bound gets rid of negative density stuff used to indicate out-of-FOV
+        # The upper bound nukes any weird hotspots and clamps bone down
+        ct_t.clamp_(-1000, 1000)
+
+        pos_t = torch.from_numpy(ct.positive_mask[slice_ndx]).unsqueeze(0) # (I,H,W) -> (1,I,H,W)
+
+        return ct_t, pos_t, ct.series_uid, slice_ndx
     
 
+class TrainingLuna2dSegmentationDataset(Luna2dSegmentationDataset):
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
+        self.ratio_int = 2
+
+    def __len__(self):
+        return 300000 # 30万
+    
+    def __getitem__(self, ndx):
+        candidateInfo_tup = self.pos_list[ndx % len(self.pos_list)]
+        return self.getitem_fullSlice(candidateInfo_tup)
+    
+    def getitem_trainingCrop(self, candidateInfo_tup):
+        # cacked disk
+        ct_a, pos_a, center_irc = getCtRawCandidate(
+            candidateInfo_tup.series_uid,
+            candidateInfo_tup.center_xyz,
+            (7, 96, 96)
+        )
+
+        pos_a = pos_a[3:4] # 結節候補Indexチャンクの中心
+
+        row_offset = random.randrange(0, 32)
+        col_offset = random.randrange(0, 32)
+        ct_t = torch.from_numpy(
+            ct_a[:, row_offset : row_offset + 64, col_offset : col_offset + 64]
+        ).to(torch.float32)
+        pos_t = torch.from_numpy(
+            pos_a[:, row_offset : row_offset + 64, col_offset : col_offset + 64]
+        ).to(torch.long) # long
+
+        slice_ndx = center_irc.index
+
+        return ct_t, pos_t, candidateInfo_tup.series_uid, slice_ndx
+    
+
+class PrepcacheLunaDataset(Dataset):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # cached in-memory
+        self.candidateInfo_list = getCandidateInfoList()
+        self.pos_list = [nt for nt in self.candidateInfo_list if nt.isNodule_bool]
+
+        self.seen_set = set()
+        self.candidateInfo_list.sort(key=lambda x: x.series_uid)
+
+    def __len__(self):
+        return len(self.candidateInfo_list)
+    
+    def __getitem__(self, ndx):
+        # candidate_t, pos_t, series_uid, center_t = super().__getitem__(ndx)
+
+        candidateInfo_tup = self.candidateInfo_list[ndx]
+        # cached disk
+        getCtRawCandidate(
+            candidateInfo_tup.series_uid, candidateInfo_tup.center_xyz, (7, 96, 96)
+        )
+
+        series_uid = candidateInfo_tup.series_uid
+        if series_uid not in self.seen_set:
+            self.seen_set.add(series_uid)
+
+            getCtSampleSize(series_uid)
+            # ct = getCt(series_uid)
+            # for mask_ndx in ct.positive_indexes:
+            #     build2dLungMask(series_uid, mask_ndx)
+
+        return 0, 1  # candidate_t, pos_t, series_uid, center_t
+    
+
+class TvTrainingLuna2dSegmentationDataset(torch.utils.data.Dataset):
+
+    def __init__(self,
+                 isValSet_bool=False,
+                 val_stride=10,
+                 contextSlices_count=3,
+                 ):
+        assert contextSlices_count == 3
+        data = torch.load("./imgs_and_masks.pt")
+        suids = list(set(data['suids']))
+        trn_mask_suids = torch.arange(len(suids)) % val_stride < (val_stride - 1)
+        trn_suids = {s for i, s in zip(trn_mask_suids, suids) if i}
+        trn_mask = torch.tensor([(s in trn_suids) for s in data['suids']])
+        if not isValSet_bool:
+            self.imgs = data['imgs'][trn_mask]
+            self.masks = data['masks'][trn_mask]
+            self.suids = [s for s, i in zip(data['suids'], trn_mask) if i] # if s == i
+        else:
+            self.imgs = data['imgs'][~trn_mask]
+            self.masks = data['masks'][~trn_mask]
+            self.suids = [s for s, i in zip(data['suids'], trn_mask) if not i] # if s != i
+        
+        # discard spurious hotspots and clamp bone
+        self.imgs.clamp_(-1000, 1000)
+        self.imgs /= 1000
+
+    def __len__(self):
+        return len(self.imgs)
+    
+    def __getitem__(self, i):
+        oh, ow = torch.randint(0, 32, (2,))
+        s1 = self.masks.size(1) // 2
+        return (
+            self.imgs[i, :, oh : oh + 64, ow : ow + 64],
+            1,
+            self.masks[i, s1 : s1 + 1, oh : oh + 64, ow : ow + 64].to(torch.float32),
+            self.suids[i],
+            9999,
+        )
