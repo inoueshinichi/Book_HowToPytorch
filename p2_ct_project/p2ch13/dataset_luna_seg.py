@@ -332,16 +332,18 @@ def getCtSampleSize(
 
 
 
-class Luna2dSegmentationDataset(Dataset):
+class Luna2dSegmentationDataset(torch.utils.data.Dataset):
 
     def __init__(
             self,
+            raw_datasetdir : str,
             val_stride=0,
             isValSet_bool=None,
             series_uid=None,
             contextSlices_count=3,
             fullCt_bool=False,
     ):
+        self.raw_datasetdir = raw_datasetdir
         self.contextSlices_count = contextSlices_count
         self.fullCt_bool = fullCt_bool
 
@@ -350,7 +352,8 @@ class Luna2dSegmentationDataset(Dataset):
             self.series_list = [series_uid]
         else:
             # cached in-memoryy
-            self.series_list = sorted(getCandidateInfoDict().keys()) # [uid1, uid2...]
+            self.series_list = sorted(getCandidateInfoDict(raw_datasetdir=self.raw_datasetdir).keys()) # [uid1, uid2...]
+
         
         if isValSet_bool:
             assert val_stride > 0, val_stride
@@ -364,7 +367,7 @@ class Luna2dSegmentationDataset(Dataset):
         self.sample_list = []
         for series_uid in self.series_list:
             # cached disk
-            index_count, positive_indexes = getCtSampleSize(series_uid) 
+            index_count, positive_indexes = getCtSampleSize(self.raw_datasetdir, series_uid) 
 
             if self.fullCt_bool:
                 self.sample_list += [
@@ -377,7 +380,7 @@ class Luna2dSegmentationDataset(Dataset):
         # finish to make self.sample_list
         
         # cached in-memory
-        self.candidateInfo_list = getCandidateInfoList() # 結節候補データセット(csv)
+        self.candidateInfo_list = getCandidateInfoList(raw_datasetdir=self.raw_datasetdir) # 結節候補データセット(csv)
 
         series_set = set(self.series_list) # 高速化
         self.candidateInfo_list = [
@@ -405,7 +408,7 @@ class Luna2dSegmentationDataset(Dataset):
         return self.getitem_fullSlice(series_uid, slice_ndx)
     
     def getitem_fullSlice(self, series_uid, slice_ndx):
-        ct = getCt(series_uid)
+        ct = getCt(series_uid, self.raw_datasetdir)
         ct_t = torch.zeros((self.contextSlices_count * 2 + 1,512,512))
 
         start_ndx = slice_ndx - self.contextSlices_count
@@ -428,8 +431,8 @@ class Luna2dSegmentationDataset(Dataset):
 
 class TrainingLuna2dSegmentationDataset(Luna2dSegmentationDataset):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, raw_datasetdir, *args, **kwargs):
+        super().__init__(raw_datasetdir, *args, **kwargs)
 
         self.ratio_int = 2
 
@@ -443,6 +446,7 @@ class TrainingLuna2dSegmentationDataset(Luna2dSegmentationDataset):
     def getitem_trainingCrop(self, candidateInfo_tup):
         # cacked disk
         ct_a, pos_a, center_irc = getCtRawCandidate(
+            self.raw_datasetdir,
             candidateInfo_tup.series_uid,
             candidateInfo_tup.center_xyz,
             (7, 96, 96)
@@ -464,13 +468,14 @@ class TrainingLuna2dSegmentationDataset(Luna2dSegmentationDataset):
         return ct_t, pos_t, candidateInfo_tup.series_uid, slice_ndx
     
 
-class PrepcacheLunaDataset(Dataset):
+class PrepcacheLunaDataset(torch.utils.data.Dataset):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, raw_datasetdir, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.raw_datasetdir = raw_datasetdir
 
         # cached in-memory
-        self.candidateInfo_list = getCandidateInfoList()
+        self.candidateInfo_list = getCandidateInfoList(raw_datasetdir=self.raw_datasetdir)
         self.pos_list = [nt for nt in self.candidateInfo_list if nt.isNodule_bool]
 
         self.seen_set = set()
@@ -485,15 +490,19 @@ class PrepcacheLunaDataset(Dataset):
         candidateInfo_tup = self.candidateInfo_list[ndx]
         # cached disk
         getCtRawCandidate(
-            candidateInfo_tup.series_uid, candidateInfo_tup.center_xyz, (7, 96, 96)
+            self.raw_datasetdir,
+            candidateInfo_tup.series_uid, 
+            candidateInfo_tup.center_xyz, 
+            (7, 96, 96)
         )
 
         series_uid = candidateInfo_tup.series_uid
         if series_uid not in self.seen_set:
             self.seen_set.add(series_uid)
 
-            getCtSampleSize(series_uid)
-            # ct = getCt(series_uid)
+            getCtSampleSize(self.raw_datasetdir,
+                            series_uid)
+            # ct = getCt(self.raw_datasetdir, series_uid)
             # for mask_ndx in ct.positive_indexes:
             #     build2dLungMask(series_uid, mask_ndx)
 
