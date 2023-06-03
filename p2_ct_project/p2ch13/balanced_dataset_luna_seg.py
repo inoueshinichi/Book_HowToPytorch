@@ -22,6 +22,7 @@ from collections import namedtuple
 import SimpleITK as sitk
 import numpy as np
 
+import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
@@ -52,7 +53,7 @@ MaskTuple = namedtuple(
     "candidate_mask",
     "lung_mask",
     "neg_mask",
-    "pos_mas"]
+    "pos_mask"]
 )
 
 # 結節候補の状態
@@ -67,8 +68,7 @@ CandidateInfoTuple = namedtuple(
     "center_xyz"]
 )
 
-# インメモリでキャッシングを行う標準的なライブラリ
-# getCandidateInfoList関数の結果をメモリキャッシュに保存する
+# cached in-memory
 @functools.lru_cache(1)
 def getCandidateInfoList(
     requireOnDisk_bool=True, 
@@ -137,9 +137,9 @@ def getCandidateInfoList(
     candidateInfo_list.sort(reverse=True)
     # これにより, 最も大きいサイズのものから始まる実際の結節サンプルに続いて, 
     # (結節のサイズの情報を持たない)結節でないサンプルが続くことになる.
-    return candidateInfo_list
+    return candidateInfo_list # (結節(悪性腫瘍), 結節(良性), 結節でない)の3つのラベルがごちゃ混ぜ
 
-# インメモリキャッシュ
+# cached in-memory
 @functools.lru_cache(1)
 def getCandidateInfoDict(
     requireOnDisk_bool=True, 
@@ -157,7 +157,7 @@ def getCandidateInfoDict(
             candidateInfo_tup
         )
 
-    return candidateInfo_dict
+    return candidateInfo_dict # series_uidをkeyにしてcandidateInfo_listを整理
 
 
 class Ct:
@@ -168,7 +168,7 @@ class Ct:
         regex_mhd_path = raw_datasetdir + "/subset*/{}.mhd".format(series_uid)
         mhd_path = glob.glob(regex_mhd_path)[0]
 
-        ct_mhd = sitk.ReadImage(mhd_path)
+        ct_mhd = sitk.ReadImage(mhd_path) # vocel
         self.hu_a = np.array(sitk.getArrayFromImage(ct_mhd), dtype=np.float32)
 
         # CTs are natively expressed in https://en.wikipedia.org/wiki/Hounsfield_scale
@@ -181,8 +181,11 @@ class Ct:
         self.direction_a = np.array(ct_mhd.GetDirection()).reshape(3,3)
 
         '''ここからがセマセグ用に追加'''
+        # 結節候補データセット
+        # cached in-memory
         candidateInfo_list = getCandidateInfoDict(raw_datasetdir = raw_datasetdir)[self.series_uid]
 
+        # 結節データセット
         self.positiveInfo_list = [candidate_tup for candidate_tup in candidateInfo_list if candidate_tup.isNodule_bool]
         self.positive_mask = self.buildAnnotationMask(self.positiveInfo_list)
         self.positive_indexes = (self.positive_mask.sum(axis=(1,2))).nonzero()[0].tolist()
@@ -246,7 +249,12 @@ class Ct:
     
     def getRawCandidate(self, center_xyz, width_irc):
 
-        center_irc = xyz2irc(center_xyz, self.origin_xyz, self.vxSize_xyz, self.direction_a)
+        center_irc = xyz2irc(
+            center_xyz, 
+            self.origin_xyz, 
+            self.vxSize_xyz, 
+            self.direction_a
+            )
 
         slice_list = []
         for axis, center_val in enumerate(center_irc):
@@ -279,18 +287,19 @@ class Ct:
 
             slice_list.append(slice(start_ndx, end_ndx))
 
-        ct_chunk = self.hu_a[tuple(slice_list)]
-        pos_chunk = self.positive_mask[tuple(slice_list)]
+        ct_chunk = self.hu_a[tuple(slice_list)] # 生データ(ct-vocel)のスライスチャンク
+        pos_chunk = self.positive_mask[tuple(slice_list)] # 結節マスクのスライスチャンク
 
         return ct_chunk, pos_chunk, center_irc
     
 
+# cached in-memory
 @functools.lru_cache(1, typed=True)
 def getCt(series_uid, raw_datasetdir : str):
     return Ct(series_uid=series_uid, raw_datasetdir=raw_datasetdir)
 
 
-# ディスクキャッシュ
+# cached disk
 @raw_cache.memoize(typed=True, tag=tag_version)
 def getCtRawCandidate(        
         raw_datasetdir : str, 
@@ -299,6 +308,7 @@ def getCtRawCandidate(
         width_irc,
         ):
     
+    # cached in-memory
     ct = getCt(
             series_uid=series_uid, 
             raw_datasetdir=raw_datasetdir, 
@@ -310,7 +320,7 @@ def getCtRawCandidate(
     return ct_chunk, pos_chunk, center_irc # center_ircが追加された
 
 
-# ディスクキャッシュ
+# cached disk
 @raw_cache.memoize(typed=True, tag=tag_version)
 def getCtSampleSize(
     raw_datasetdir : str,
@@ -336,7 +346,77 @@ class Luna2dSegmentationDataset(Dataset):
         self.fullCt_bool = fullCt_bool
 
         # 続きはここから. '23/5/28
-            
+        if series_uid:
+            self.series_list = [series_uid]
+        else:
+            # cached in-memoryy
+            self.series_list = sorted(getCandidateInfoDict().keys()) # [uid1, uid2...]
+        
+        if isValSet_bool:
+            assert val_stride > 0, val_stride
+            self.series_list = self.series_list[::val_stride]
+            assert self.series_list
+        elif val_stride > 0:
+            del self.series_list[::val_stride] # 全体のデータセットからValidationだけを除外
+            assert self.series_list
+
+        
+        self.sample_list = []
+        for series_uid in self.series_list:
+            # cached disk
+            index_count, positive_indexes = getCtSampleSize(series_uid) 
+
+            if self.fullCt_bool:
+                self.sample_list += [
+                    (series_uid, slice_ndx) for slice_ndx in range(index_count)
+                ]
+            else:
+                self.sample_list += [
+                    (series_uid, slice_ndx) for slice_ndx in positive_indexes
+                ]
+        # finish to make self.sample_list
+        
+        # cached in-memory
+        self.candidateInfo_list = getCandidateInfoList() # 結節候補データセット(csv)
+
+        series_set = set(self.series_list) # 高速化
+        self.candidateInfo_list = [
+            cit for cit in self.candidateInfo_list if cit.series_uid in series_set
+        ]
+        
+        # 結節データセット(csv)
+        self.pos_list = [nt for nt in self.candidateInfo_list if nt.isNodule_bool]
+
+        log.info(
+            "{!r}: {} {} seires, {} slices, {} nodules".foramt(
+                self,
+                len(self.series_list),
+                {None: "general", True: "validation", False: "training"}[isValSet_bool],
+                len(self.sample_list),
+                len(self.pos_list),
+            )
+        )
+
+    def __len__(self):
+        return len(self.sample_list)
+    
+    def __getitem__(self, ndx):
+        series_uid, slice_ndx = self.sample_list[ndx % len(self.sample_list)]
+        return self.getitem_fullSlice(series_uid, slice_ndx)
+    
+    def getitem_fullSlice(self, series_uid, slice_ndx):
+        ct = getCt(series_uid)
+        ct_t = torch.zeros((self.contextSlices_count * 2 + 1,512,512))
+
+        start_ndx = slice_ndx - self.contextSlices_count
+        end_ndx = slice_ndx + self.contextSlices_count + 1
+        for i, context_ndx in enumerate(range(start_ndx, end_ndx)):
+            context_ndx = max(context_ndx, 0)
+            context_ndx = min(context_ndx, ct.hu_a.shape[0] - 1)
+            ct_t[i] = torch.from_numpy(ct.hu_a[context_ndx].astype(np.float32))
+
+        
+    
 
 
 

@@ -68,10 +68,16 @@ class UNetWrapper(nn.Module):
         return fn_output
 
 
-
+# GPUで行うためのデータ拡張モジュール(nn.Moduleを継承)
 class SegmentationAugmentation(nn.Module):
 
-    def __init__(self, flip=None, offset=None, scale=None, rotate=None, noise=None):
+    def __init__(self, 
+                 flip=None, 
+                 offset=None, 
+                 scale=None, 
+                 rotate=None, 
+                 noise=None
+                 ):
         super().__init__()
 
         self.flip = flip
@@ -82,15 +88,15 @@ class SegmentationAugmentation(nn.Module):
 
 
     def forward(self, input_g, label_g):
-        transform_t = self._build2dTransformMatrix()
-        transform_t = transform_t.expand(input_g.shape[0], -1, -1)
-        transform_t = transform_t.to(input_g.device, torch.float32)
+        transform_t = self._build2dTransformMatrix() # (3,3)
+        transform_t = transform_t.expand(input_g.shape[0], -1, -1) # (3,3) -> (N,3,3)
+        transform_t = transform_t.to(input_g.device, torch.float32) # to GPU
         affine_t = F.affine_grid(
             transform_t[:, :2], input_g.size(), align_corners=False
-        )
+        ) # IN : theta: 2D(N,2,3)or3D(N,3,4) size:2D(N,C,H,W)or3D(N,C,D,H,W), OUT : (N,Hout,Wout,2)
 
-        # input : 4D (N,C,Hin,Win) or 5D (N,C,Din,Hin,Win)
-        # grid : (N,Hout,Wout,2) or (N,Dout,Hout,Wout,3)
+        # input : 2D (N,C,Hin,Win) or 3D (N,C,Din,Hin,Win)
+        # grid : (N,Hout,Wout,2)
         # output: (N,C,Hout,Wout) or (N,C,Dout,Hout,Wout)
         augmented_input_g = F.grid_sample( # input
             input=input_g, 
@@ -98,6 +104,9 @@ class SegmentationAugmentation(nn.Module):
             padding_mode="border", 
             align_corners=False
         )
+
+        # CTと結節マスクにも必要なので同じグリッドを使用する.
+        # grid_sampleに入力するためにfloatに変換.
         augmented_label_g = F.grid_sample( # label
             input=label_g.to(torch.float32),
             grid=affine_t,
@@ -109,12 +118,14 @@ class SegmentationAugmentation(nn.Module):
             noise_t = torch.randn_like(augmented_input_g)
             noise_t *= self.noise
 
-        return augmented_input_g, augmented_input_g > 0.5
+        # ラベルがデータ拡張で0or1以外になている箇所もあるので, bool型に戻す
+        return augmented_input_g, augmented_label_g > 0.5
     
 
     def _build2dTransformMatrix(self):
         transform_t = torch.eye(3)
 
+        # (x,y) ランダム処理
         for i in range(2):
             if self.flip:
                 if random.random() > 0.5:
@@ -142,12 +153,23 @@ class SegmentationAugmentation(nn.Module):
             
             transform_t @= rotation_t
         
-        return transform_t
+        return transform_t # Affine(3,3)
     
 
 
 
-MaskTuple = namedtuple('MaskTuple', 'raw_dense_mask, dense_mask, body_mask, air_mask, raw_candidate_mask, candidate_mask, lung_mask, neg_mask, pos_mask')
+MaskTuple = namedtuple(
+    'MaskTuple', 
+    ['raw_dense_mask', 
+    'dense_mask', 
+    'body_mask',
+    'air_mask', 
+    'raw_candidate_mask', 
+    'candidate_mask', 
+    'lung_mask', 
+    'neg_mask', 
+    'pos_mask']
+    )
 
 class SegmentationMask(nn.Module):
     def __init__(self):
