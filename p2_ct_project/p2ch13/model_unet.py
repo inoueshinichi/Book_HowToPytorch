@@ -33,7 +33,7 @@ class UNetWrapper(nn.Module):
 
         # BatchNorm2d は入力のチャンネル数を必要とする
         # その情報をキーワード引数から取り出す
-        self.input_batchnorm = nn.BatchNorm2d(kwargs["in_chanenls"])
+        self.input_batchnorm = nn.BatchNorm2d(kwargs["in_channels"])
         # U-Netの取り込み部分はこれだけだが、ほとんどの処理はここで行われる
         self.unet = UNet(**kwargs)
         self.final = nn.Sigmoid()
@@ -53,10 +53,10 @@ class UNetWrapper(nn.Module):
             if type(m) in init_set:
                 nn.init.kaiming_normal_(m.weight.data, mode="fan_out", nonlinearity="relu", a=0)
             
-            if m.bias is not None:
-                fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(m.weight.data)
-                bound = 1 / math.sqrt(fan_out)
-                nn.init.normal_(m.bias, -bound, bound)
+                if m.bias is not None:
+                    fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(m.weight.data)
+                    bound = 1 / math.sqrt(fan_out)
+                    nn.init.normal_(m.bias, -bound, bound)
 
         # nn.init.constant_(self.unet.last.bias, -4)
         # nn.init.constant_(self.unet.last.bias, 4)

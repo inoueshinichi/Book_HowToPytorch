@@ -28,7 +28,7 @@ class UNet(nn.Module):
     
     def __init__(self, 
                 in_channels=1, 
-                n_channels=2,
+                n_classes=2,
                 depth=5,
                 wf=6, 
                 padding=False,
@@ -75,7 +75,7 @@ class UNet(nn.Module):
             self.up_path.append(UNetUpBlock(prev_channels, 2**(wf+i), up_mode, padding, batch_norm))
             prev_channels = 2**(wf+i)
 
-        self.last = nn.Conv2d(prev_channels, n_channels, kernel_size=1) # 1x1 conv
+        self.last = nn.Conv2d(prev_channels, n_classes, kernel_size=1) # 1x1 conv
 
     def forward(self, x):
         blocks = []

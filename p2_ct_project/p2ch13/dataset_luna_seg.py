@@ -59,7 +59,7 @@ MaskTuple = namedtuple(
 # 結節候補の状態
 # 結節フラグ, アノテーションフラグ, 悪性腫瘍フラグ,  直径, 識別子, 結節候補の中心座標
 CandidateInfoTuple = namedtuple(
-    "CandidteInfoTuple",
+    "CandidateInfoTuple",
     ["isNodule_bool",
     "hasAnnotation_bool",
     "isMal_bool",
@@ -169,7 +169,7 @@ class Ct:
         mhd_path = glob.glob(regex_mhd_path)[0]
 
         ct_mhd = sitk.ReadImage(mhd_path) # vocel
-        self.hu_a = np.array(sitk.getArrayFromImage(ct_mhd), dtype=np.float32)
+        self.hu_a = np.array(sitk.GetArrayFromImage(ct_mhd), dtype=np.float32)
 
         # CTs are natively expressed in https://en.wikipedia.org/wiki/Hounsfield_scale
         # HU are scaled oddly, with 0 g/cc (air, approximately) begin -1000 and 1 g/cc (water) begin 0.
@@ -328,7 +328,7 @@ def getCtSampleSize(
     ):
 
     ct = Ct(series_uid, raw_datasetdir)
-    return int(ct.hu_a.shape[0]), ct._positive_indexes # [0, N], [pi1, pi2, pi3, ...]
+    return int(ct.hu_a.shape[0]), ct.positive_indexes # [0, N], [pi1, pi2, pi3, ...]
 
 
 
@@ -391,7 +391,7 @@ class Luna2dSegmentationDataset(torch.utils.data.Dataset):
         self.pos_list = [nt for nt in self.candidateInfo_list if nt.isNodule_bool]
 
         log.info(
-            "{!r}: {} {} seires, {} slices, {} nodules".foramt(
+            "{!r}: {} {} seires, {} slices, {} nodules".format(
                 self,
                 len(self.series_list),
                 {None: "general", True: "validation", False: "training"}[isValSet_bool],
@@ -439,9 +439,13 @@ class TrainingLuna2dSegmentationDataset(Luna2dSegmentationDataset):
     def __len__(self):
         return 300000 # 30万
     
+    def shuffleSamples(self):
+        random.shuffle(self.candidateInfo_list)
+        random.shuffle(self.pos_list)
+    
     def __getitem__(self, ndx):
         candidateInfo_tup = self.pos_list[ndx % len(self.pos_list)]
-        return self.getitem_fullSlice(candidateInfo_tup)
+        return self.getitem_trainingCrop(candidateInfo_tup)
     
     def getitem_trainingCrop(self, candidateInfo_tup):
         # cacked disk

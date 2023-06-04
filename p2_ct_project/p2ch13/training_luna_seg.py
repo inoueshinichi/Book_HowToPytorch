@@ -149,6 +149,7 @@ class SegmentationTrainingApp:
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
 
         self.model = self.initModel()
+        self.segmentation_model, self.augmentation_model = self.model
         self.optimizer = self.initOptimizer()
 
     def initModel(self):
@@ -171,7 +172,7 @@ class SegmentationTrainingApp:
             if torch.cuda.device_count() > 1:
                 segmentation_model = nn.DataParallel(segmentation_model)
                 augmentation_model = nn.DataParallel(augmentation_model)
-            segmentation_model = segmentation_model.to(self.deivce)
+            segmentation_model = segmentation_model.to(self.device)
             augmentation_model = augmentation_model.to(self.device)
 
         return segmentation_model, augmentation_model
@@ -233,9 +234,367 @@ class SegmentationTrainingApp:
                 log_dir=log_dir + "-val_cls-" + self.cli_args.comment
             )
 
+    def main(self):
+        log.info("Starting {}, {}".format(type(self).__name__, self.cli_args))
+
+        train_dl = self.initTrainDl()
+        val_dl = self.initValDl()
+
+        best_score = 0.0
+        self.validation_cadence = 5
+        for epoch_ndx in range(1, self.cli_args.epochs + 1):
+            log.info("Epoch {} of {}, {}/{} batches of size {}*{}".format(
+                epoch_ndx,
+                self.cli_args.epochs,
+                len(train_dl),
+                len(val_dl),
+                self.cli_args.batch_size,
+                (torch.cuda.device_count() if self.use_cuda else 1),
+            ))
+
+            trnMetrics_t = self.doTraining(epoch_ndx, train_dl)
+            self.logMetrics(epoch_ndx, 'trn', trnMetrics_t)
+
+            # 5epochに1回検証
+            if epoch_ndx == 1 or epoch_ndx % self.validation_cadence == 0:
+                # if validation is wanted
+                valMetrics_t = self.doValidation(epoch_ndx, val_dl)
+                score = self.logMetrics(epoch_ndx, 'val', valMetrics_t)
+                best_score = max(score, best_score)
+
+                self.saveModel('seg', epoch_ndx, score == best_score)
+
+                self.logImages(epoch_ndx, 'trn', train_dl)
+                self.logImages(epoch_ndx, 'val', val_dl)
+
+        self.trn_writer.close()
+        self.val_writer.close()
+
+    def doTraining(self, epoch_ndx, train_dl):
+        trnMetrics_g = torch.zeros(METRICS_SIZE, 
+                                   len(train_dl.dataset), 
+                                   device=self.device)
+        # training mode
+        self.segmentation_model.train()
+
+        train_dl.dataset.shuffleSamples()
+
+        batch_iter = enumerateWithEstimate(
+            train_dl,
+            "E{} Training ".format(epoch_ndx),
+            start_ndx=train_dl.num_workers,
+        )
+        for batch_ndx, batch_tup in batch_iter:
+            # モデルパラメータの勾配を初期化
+            self.optimizer.zero_grad()
+
+            loss_var = self.computeBatchLoss(
+                batch_ndx,
+                batch_tup,
+                train_dl.batch_size,
+                trnMetrics_g,
+            )
+
+            # 勾配計算
+            loss_var.backward() 
+
+            # モデルパラメータの更新
+            self.optimizer.step() 
+
+        self.totalTrainingSamples_count += trnMetrics_g.size(1)
+
+        return trnMetrics_g.to('cpu')
     
-
-
-
-
+    def doValidation(self, epoch_ndx, val_dl):
+        with torch.no_grad():
+            valMetrics_g = torch.zeros(METRICS_SIZE,
+                                       len(val_dl.dataset),
+                                       device=self.device
+                                       )
             
+            # validation mode
+            self.segmentation_model.eval()
+
+            batch_iter = enumerateWithEstimate(
+                val_dl,
+                "E{} Validation ".format(epoch_ndx),
+                start_ndx=val_dl.num_workers,
+            )
+            for batch_ndx, batch_tup in batch_iter:
+                self.computeBatchLoss(
+                    batch_ndx,
+                    batch_tup,
+                    val_dl.batch_size,
+                    valMetrics_g,
+                )
+            
+        return valMetrics_g.to('cpu')
+    
+    def computeBatchLoss(self,
+                         batch_ndx,
+                         batch_tup,
+                         batch_size,
+                         metrics_g,
+                         classificationThreshold=0.5,
+                         ):
+        input_t, label_t, series_list, _slice_ndx_list = batch_tup
+
+        input_g = input_t.to(self.device, non_blocking=True)
+        label_g = label_t.to(self.device, non_blocking=True)
+
+        # training mode かつ データ拡張有効
+        if self.segmentation_model.training and self.augmentation_dict:
+            input_g, label_g = self.augmentation_model(input_g, label_g)
+
+        prediction_g = self.segmentation_model(input_g)
+
+        # Dice損失
+        diceLoss_g = self.diceLoss(prediction_g, label_g)
+        # False Negativeな損失
+        fnLoss_g = self.diceLoss(prediction_g * label_g, label_g)
+
+        start_ndx = batch_ndx * batch_size
+        end_ndx = start_ndx + input_t.size(0)
+
+        # 測量
+        with torch.no_grad():
+            predictionBool_g = (prediction_g[:, 0:1] > classificationThreshold).to(torch.float32)
+
+            tp = (predictionBool_g * label_g).sum(dim=[1,2,3]) # True : True
+            fn = ((1-predictionBool_g) * label_g).sum(dim=[1,2,3]) # False : True
+            fp = (predictionBool_g * (~label_g)).sum(dim=[1,2,3]) # True : False
+
+            metrics_g[METRICS_LOSS_NDX, start_ndx:end_ndx] = diceLoss_g
+            metrics_g[METRICS_TP_NDX, start_ndx:end_ndx] = tp
+            metrics_g[METRICS_FN_NDX, start_ndx:end_ndx] = fn
+            metrics_g[METRICS_FP_NDX, start_ndx:end_ndx] = fp
+
+        # False Negativeな損失を8倍にして, 間違った回答に対する修正率を高く設定する.
+        return diceLoss_g.mean() + fnLoss_g.mean() * 8
+    
+    # Dice損失・・・セマセグで多用される. ピクセル単位のクロスエントロピー損失に対して,
+    # 画像全体に対して比較的狭い領域だけが陽性となるケールを扱える. (クラスの不バランスに強い)
+    def diceLoss(self, 
+                 prediction_g, 
+                 label_g, 
+                 epsilon=1,
+                 ):
+        # (N,I,H,W) prediction_g, label_g
+
+        # バッチインデックスN以外の次元に対して総和を計算して,
+        # 陽性ラベル数, 陽性と推定された数, 正解数を計算する.
+        diceLabel_g = label_g.sum(dim=[1,2,3])
+        dicePrediction_g = prediction_g.sum(dim=[1,2,3])
+        diceCorrect_g = (prediction_g * label_g).sum(dim=[1,2,3])
+
+        # Dice比率
+        diceRatio_g = (2 * diceCorrect_g + epsilon) / (dicePrediction_g + diceLabel_g + epsilon)
+
+         # Dice損失
+        return 1 - diceRatio_g
+    
+    def logImages(self, 
+                  epoch_ndx,
+                  mode_str,
+                  dl):
+        # 推論モード
+        self.segmentation_model.eval()
+
+        # 毎回同じ12個のCTデータをデータセットから直接取得する
+        # リストはシャッフル済みの可能性があるので, ソートする
+        images = sorted(dl.dataset.series_list)[:12]
+        for series_ndx, series_uid in enumerate(images):
+            ct = getCt(series_uid, self.cli_args.datasetdir)
+
+            for slice_ndx in range(6):
+                # 等間隔の6枚のCTスライス画像を選択
+                ct_ndx = slice_ndx * (ct.hu_a.shape[0] - 1) // 5
+                sample_tup = dl.dataset.getitem_fullSlice(series_uid, ct_ndx)
+
+                ct_t, label_t, series_uid, ct_ndx = sample_tup
+
+                # ct_tをモデル(UNet)に入力して結果を取得
+                input_g = ct_t.to(self.device).unsqueeze(0)
+                label_g = pos_g = label_t.to(self.device).unsqueeze(0)
+                prediction_g = self.segmentation_model(input_g)[0]
+                prediction_a = prediction_g.to('cpu').detach().numpy()[0] > 0.5 # 陽性と推論した結果(セグメンテーション)
+                label_a = label_g.cpu().numpy()[0][0] > 0.5 # 結節
+
+                ct_t[:-1, :, :] /= 2000
+                ct_t[:-1, :, :] += 0.5
+
+                ctSlice_a = ct_t[dl.dataset.contextSlices_count].numpy()
+
+                # 表示するRGB値を格納するimage_aを作成する float32[0,1]
+                # 推論結果とラベルを使って, 真陽性(TP), 偽陰性(FN),偽陽性(FP)に色をつける
+                image_a = np.zeros((512, 512, 3), dtype=np.float32)
+                image_a[:,:,:] = ctSlice_a.reshape((512,512,1))
+
+                # 偽陽性(FP)は, 赤に着色
+                image_a[:,:,0] += prediction_a & (1 - label_a) 
+
+                # 偽陰性(FN)は, オレンジで着色
+                image_a[:,:,0] += (1 - prediction_a) & label_a 
+                image_a[:,:,1] += ((1 - prediction_a) & label_a) * 0.5
+
+                # 真陽性(TP)は, 緑で着色
+                image_a[:,:,1] += prediction_a & label_a 
+
+                image_a *= 0.5
+                image_a.clip(0, 1, image_a)
+
+                # TensorBoardに着色画像を保存
+                writer = getattr(self, mode_str + "_writer")
+                writer.add_image(
+                    f'{mode_str}/{series_ndx}_prediction_{slice_ndx}',
+                    image_a,
+                    self.totalTrainingSamples_count,
+                    dataformats='HWC',
+                )
+    
+                if epoch_ndx == 1:
+                    # 正解の画像もTensorBoardに保存しておく
+                    image_a = np.zeros((512,512,3), dtype=np.float32)
+                    image_a[:,:,:] = ctSlice_a.reshape((512,512,1))
+                    # image_a[:,:,0] += (1 - label_a) & luna_a # Red
+                    image_a[:,:,1] += label_a # Green
+                    # image_a[:,:,2] += neg_a # Blue
+
+                    image_a *= 0.5
+                    image_a[image_a < 0] = 0
+                    image_a[image_a > 1] = 1
+                    writer.add_image(
+                        "{}/{}_label_{}".format(
+                        mode_str,
+                        series_ndx,
+                        slice_ndx,
+                        ),
+                        image_a,
+                        self.totalTrainingSamples_count,
+                        dataformats='HWC',
+                    )
+
+                    # This flush prevents TB from getting confused about 
+                    # which data item belongs where.
+                    writer.flush()
+
+    def logMetrics(self, 
+                   epoch_ndx, 
+                   mode_str,
+                   metrics_t,
+                   ):
+        log.info("E{} {}".format(
+            epoch_ndx,
+            type(self).__name__,
+        ))
+
+        metrics_a = metrics_t.detach().numpy()
+        sum_a = metrics_a.sum(axis=1)
+        assert np.isfinite(metrics_a).all()
+
+        allLabel_count = sum_a[METRICS_TP_NDX] + sum_a[METRICS_FN_NDX]
+
+        metrics_dict = {}
+        metrics_dict['loss/all'] = metrics_a[METRICS_LOSS_NDX].mean()
+
+        metrics_dict['percent_all/tp'] = sum_a[METRICS_TP_NDX] / (allLabel_count or 1) * 100
+        metrics_dict['percent_all/fn'] = sum_a[METRICS_FN_NDX] / (allLabel_count or 1) * 100
+        metrics_dict['percent_all/fp'] = sum_a[METRICS_FP_NDX] / (allLabel_count or 1) * 100
+
+        precision = metrics_dict['pr/precision'] = sum_a[METRICS_TP_NDX] / ((sum_a[METRICS_TP_NDX] + sum_a[METRICS_FP_NDX]) or 1)
+        recall = metrics_dict['pr/recall'] = sum_a[METRICS_TP_NDX] / ((sum_a[METRICS_TP_NDX] + sum_a[METRICS_FN_NDX]) or 1)
+
+        metrics_dict['pr/f1_score'] = 2 * (precision * recall) /((precision + recall) or 1)
+
+        log.info(("E{} {:8} "
+                  + "{loss/all:.4f} loss, "
+                  + "{pr/precision:.4f} precision, "
+                  + "{pr/recall:.4f} recall, "
+                  + "{pr/f1_score:.4f} f1 score"
+                  ).format(
+            epoch_ndx,
+            mode_str,
+            **metrics_dict,
+        ))
+
+        log.info(("E{} {:8} "
+                  + "{loss/all:.4f} loss, "
+                  + "{percent_all/tp:-5.1f}% tp, {percent_all/fn:-5.1f}% fn, {percent_all/fp:-9.1f}% fp"
+                  ).format(
+            epoch_ndx,
+            mode_str + '_all',
+            **metrics_dict,
+        ))
+
+        self.initTensorboardWriters()
+        writer = getattr(self, mode_str + '_writer')
+
+        prefix_str = 'seg_'
+
+        for key, value in metrics_dict.items():
+            writer.add_scalar(prefix_str + key, value,
+                              self.totalTrainingSamples_count)
+
+        writer.flush()
+
+        score = metrics_dict['pr/recall']
+
+        return score
+
+    def saveModel(self,
+                  type_str,
+                  epoch_ndx,
+                  isBest=False,
+    ):
+        file_path = os.path.join(
+            "models",
+            self.cli_args.tb_prefix,
+            'data-unversioned',
+            '{}_{}_{}.{}.state'.format(
+                type_str,
+                self.time_str,
+                self.cli_args.comment,
+                self.totalTrainingSamples_count,
+            )
+        )
+
+        os.makedirs(os.path.dirname(file_path), mode=0o755, exist_ok=True)
+
+        model = self.segmentation_model
+        if isinstance(model, torch.nn.DataParallel):
+            model = model.module # DataParallelでラップされている場合は, 取り出す.
+
+        state = {
+            'sys_argv': sys.argv,
+            'time': str(datetime.datetime.now()),
+            'model_state': model.state_dict(), # モデルパラメータ
+            'model_name': type(model).__name__,
+            'optimizer_state': self.optimizer.state_dict(), # オプティマイザパラメータ
+            'optimizer_name': type(self.optimizer).__name__,
+            'epoch': epoch_ndx,
+            'totalTrainingSamples_count': self.totalTrainingSamples_count,
+        }
+
+        torch.save(state, file_path)
+
+        log.info("Saved model params to {}".format(file_path))
+
+        if isBest:
+            best_path = os.path.join(
+                'models',
+                self.cli_args.tb_prefix,
+                'data-unversioned',
+                f'{type_str}_{self.time_str}_{self.cli_args.comment}.best.state'
+            )
+            shutil.copyfile(file_path, best_path)
+
+            log.info("Saved model params to {}".format(best_path))
+
+        with open(file_path, 'rb') as f:
+            log.info("SHA1: " + hashlib.sha1(f.read()).hexdigest())
+
+
+if __name__ == "__main__":
+    SegmentationTrainingApp().main()
+
+
