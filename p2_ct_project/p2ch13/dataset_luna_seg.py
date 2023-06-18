@@ -160,6 +160,7 @@ def getCandidateInfoDict(
     return candidateInfo_dict # series_uidをkeyにしてcandidateInfo_listを整理
 
 
+# セマセグ用
 class Ct:
 
     def __init__(self, 

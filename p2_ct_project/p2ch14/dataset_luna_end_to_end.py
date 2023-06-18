@@ -1,7 +1,4 @@
-"""データセット内でクラスバランスを調整する
-    ・訓練セットの陽性サンプル数と陰性サンプル数が1対1になるようにする
-    ・陰性サンプルのリストと陽性サンプルのリストを作成し, これらのリストから交互にサンプルを取り出すようにする.
-    ・副次効果として, ミニバッチの1バッチあたりのデータ比率が1対1になり, イテレーションごとにNNモデルが適切に学習できる.
+"""セマセグ用データセットからのリークを考慮した結節判別用データセット
 """
 
 import os
@@ -25,7 +22,9 @@ from collections import namedtuple
 import SimpleITK as sitk
 import numpy as np
 
+import torch
 import torch.nn.functional as F
+from torch.utils.data import Dataset
 
 from util.disk import getCache
 from util.util import XyzTuple, xyz2irc
@@ -39,87 +38,126 @@ log.setLevel(logging.DEBUG)
 # diskcacheのタグ
 tag_version = "unversioned"
 
-# 生データセットのディスクキャッシュ
-raw_cache = getCache(cachedir="F:/Luna16", scope_str="p2ch12_raw")
+raw_cache = getCache("F:/Luna16", "p2ch13_raw")
 
-# 結節の状態(分類対象), 直径, 識別子, 結節候補の中心座標
+
+# セグメンテーション用マスク
+# 生密度, 密度, 身体, 空気, 生結節候補, 結節候補, 肺, 良性結節, 悪性結節
+MaskTuple = namedtuple(
+    "MaskTuple",
+    ["raw_dense_mask",
+    "dense_mask",
+    "body_mask",
+    "air_mask",
+    "raw_candidate_mask",
+    "candidate_mask",
+    "lung_mask",
+    "neg_mask",
+    "pos_mask"]
+)
+
+# 結節候補の状態
+# 結節フラグ, アノテーションフラグ, 悪性腫瘍フラグ,  直径, 識別子, 結節候補の中心座標
 CandidateInfoTuple = namedtuple(
-    'CandidateInfoTuple',
-    ['isNodule_bool', 'diameter_mm', 'series_uid', 'center_xyz']
-    )
+    "CandidateInfoTuple",
+    ["isNodule_bool",
+    "hasAnnotation_bool",
+    "isMal_bool",
+    "diameter_mm",
+    "series_uid",
+    "center_xyz"]
+)
 
-
-# Make CandidateInfoTuple with Helper 関数 for loading luna dataset
-@functools.lru_cache(1) # インメモリでキャッシングを行う標準的なライブラリ : getCandidateInfoList関数の結果をメモリキャッシュに保存する
+# cached in-memory
+@functools.lru_cache(1)
 def getCandidateInfoList(
     requireOnDisk_bool=True, 
-    raw_datasetdir : str = "",
+    raw_datasetdir : str = "", 
     ):
     # We construct a set with all series_uids that are present on disk.
     # This will let us use the data, even if we haven't downloaded all of
     # the subsets yet.
 
-    # 生データ(3D) cached
+    # 生データ(3D)
     regex_mhd_path = raw_datasetdir + "/subset*/*.mhd"
     mhd_list = glob.glob(regex_mhd_path)
     presentOnDisk_set = { os.path.split(p)[-1][:-4] for p in mhd_list } # filenames
 
-    # アノテーション(annotations.csv)から直径の情報をマージする
-    diameter_dict = {}
-    anno_path = raw_datasetdir + "/annotations.csv"
-    with open(anno_path, 'r') as f:
+    # 重複を排除した結節アノテーション(annotations_with_malignancy.csv)
+    candidateInfo_list = []
+    anno_path = raw_datasetdir + "/annotations_with_malignancy.csv"
+    with open(anno_path, "r") as f:
         for row in list(csv.reader(f))[1:]:
             series_uid = row[0]
+            if series_uid not in presentOnDisk_set and requireOnDisk_bool:
+                continue
+
             annotationCenter_xyz = tuple([float(x) for x in row[1:4]])
             annotationDiameter_mm = float(row[4])
 
-            diameter_dict.setdefault(series_uid, []).append(
-                (annotationCenter_xyz, annotationDiameter_mm)
+            # new
+            isMal_bool = {"False": False, "True": True}[row[5]] # 悪性腫瘍フラグ
+
+            candidateInfo_list.append(
+                CandidateInfoTuple(
+                    True, # 結節フラグ
+                    True, # アノテーションフラグ
+                    isMal_bool, # 悪性腫瘍フラグ
+                    annotationDiameter_mm, # 直径
+                    series_uid, # 識別子
+                    annotationCenter_xyz, # 中心
+                )
             )
-    
-    # CandidateデータをAnnoatationデータでフィルタリングする
-    # presetOnDisk_setに存在する`series_uid`のみを扱う
-    # AnnotationとCandidateで各中心座標(x,y,z)の距離がAnnotationDiameter_mmの1/4以下のもののみを扱う
-    candidateInfo_list = []
+
+    # 結節でないデータを取得する
     cand_path = raw_datasetdir + "/candidates.csv"
-    with open(cand_path, 'r') as f:
+    with open(cand_path, "r") as f:
         for row in list(csv.reader(f))[1:]:
             series_uid = row[0]
 
             if series_uid not in presentOnDisk_set and requireOnDisk_bool:
-                # series_uidが存在しない場合, ディクス上にないサブセットデータなのでスキップ.
                 continue
 
-            isNodule_bool = bool(int(row[4])) # 0 : 結節ではない, 1 : 結節である
+            isNodule_bool = bool(int(row[4]))
             candidateCenter_xyz = tuple([float(x) for x in row[1:4]])
 
-            candidateDiameter_mm = 0.0
-            for annotation_tup in diameter_dict.get(series_uid, []):
-                annotationCenter_xyz, annotationDiameter_mm = annotation_tup
-                for i in range(3):
-                    delta_mm = abs(candidateCenter_xyz[i] - annotationCenter_xyz[i])
-                    if delta_mm > annotationDiameter_mm / 4:
-                        # 直径を2で除算して半径を求めた上で,
-                        # 半径を2で除算することで,
-                        # 結節に対する2つのファイルの中心座標のズレが
-                        # 結節の大きさに対して大きくないことを確認する.
-                        # (これは, 距離をチェックしているのではなく, アノテーションのバウンディングボックスの正常性をチェックしている)
-                        break
-                else:
-                    candidateDiameter_mm = annotationDiameter_mm
-                    break
-
-            candidateInfo_list.append(CandidateInfoTuple(
-                isNodule_bool,
-                candidateDiameter_mm,
-                series_uid,
-                candidateCenter_xyz,
-            ))
+            # 結節でないデータ
+            if not isNodule_bool:
+                candidateInfo_list.append(
+                    CandidateInfoTuple(
+                        False,# 結節フラグ
+                        False,# アノテーションフラグ
+                        False,# 悪性腫瘍フラグ
+                        0.0,# 直径
+                        series_uid,# 識別子
+                        candidateCenter_xyz,# 中心
+                    )
+                )
 
     candidateInfo_list.sort(reverse=True)
     # これにより, 最も大きいサイズのものから始まる実際の結節サンプルに続いて, 
     # (結節のサイズの情報を持たない)結節でないサンプルが続くことになる.
-    return candidateInfo_list
+    return candidateInfo_list # (結節(悪性腫瘍), 結節(良性), 結節でない)の3つのラベルがごちゃ混ぜ
+
+# cached in-memory
+@functools.lru_cache(1)
+def getCandidateInfoDict(
+    requireOnDisk_bool=True, 
+    raw_datasetdir : str = "", 
+    ):
+    candidateInfo_list = getCandidateInfoList(
+                            requireOnDisk_bool, 
+                            raw_datasetdir
+                            )
+    
+    candidateInfo_dict = {}
+
+    for candidateInfo_tup in candidateInfo_list:
+        candidateInfo_dict.setdefault(candidateInfo_tup.series_uid, []).append(
+            candidateInfo_tup
+        )
+
+    return candidateInfo_dict # series_uidをkeyにしてcandidateInfo_listを整理
 
 
 # 結節分類用
@@ -191,7 +229,7 @@ class Ct:
         ct_chunk = self.hu_a[tuple(slice_list)]
 
         return ct_chunk, center_irc
-
+    
 # インメモリキャッシュ
 @functools.lru_cache(1, typed=True)
 def getCt(
@@ -201,7 +239,6 @@ def getCt(
     return Ct(series_uid=series_uid, 
               raw_datasetdir=raw_datasetdir, 
               )
-
 
 # diskcache.FanoutCache(DBへInterface)に関数・引数・戻り値を登録する
 @raw_cache.memoize(typed=True, tag=tag_version)
@@ -219,7 +256,6 @@ def getCtRawCandidate(
     
     ct_chunk, center_irc = ct.getRawCandidate(center_xyz, width_irc)
     return ct_chunk, center_irc
-
 
 '''データ拡張関数'''
 def getCtAugmentedCandidate(
@@ -309,8 +345,6 @@ def getCtAugmentedCandidate(
     return augmented_chunk[0], center_irc
 
 
-
-
 # データバランス調整済みLunaDataset
 import torch
 import torch.cuda
@@ -344,19 +378,44 @@ class LunaDataset(Dataset):
             self.use_cache = True
 
 
-        if series_uid:
-            self.candidateInfo_list = [
-                x for x in self.candidateInfo_list if x.series_uid == series_uid
-            ]
-        
-        if isValSet_bool:
-            assert val_stride > 0, val_stride
-            self.candidateInfo_list = self.candidateInfo_list[::val_stride]
-            assert self.candidateInfo_list
-        elif val_stride > 0:
-            del self.candidateInfo_list[::val_stride]
-            assert self.candidateInfo_list
+        # if series_uid:
+        #     self.candidateInfo_list = [
+        #         x for x in self.candidateInfo_list if x.series_uid == series_uid
+        #     ]
 
+        if series_uid:
+            self.series_list = [series_uid]
+        else:
+            self.series_list = sorted(
+                set(
+                    candidateInfo_tup.series_uid
+                    for candidateInfo_tup in self.candidateInfo_list
+                )
+            )
+        
+        # if isValSet_bool:
+        #     assert val_stride > 0, val_stride
+        #     self.candidateInfo_list = self.candidateInfo_list[::val_stride]
+        #     assert self.candidateInfo_list
+        # elif val_stride > 0:
+        #     del self.candidateInfo_list[::val_stride]
+        #     assert self.candidateInfo_list
+
+        if isValSet_bool: # validation
+            assert val_stride > 0, val_stride
+            self.series_list = self.series_list[::val_stride]
+            assert self.series_list
+        elif val_stride > 0: # training
+            del self.series_list[::val_stride] # validationデータセットを除外
+            assert self.series_list
+
+        # candidateInfo_listのフィルタ
+        series_set = set(self.series_list)
+        self.candidateInfo_list = [
+            x for x in self.candidateInfo_list if x.series_uid in series_set
+        ]
+
+        
         if sortby_str == "random":
             random.shuffle(self.candidateInfo_list)
         elif sortby_str == "series_uid":
@@ -377,6 +436,16 @@ class LunaDataset(Dataset):
             nt for nt in self.candidateInfo_list if nt.isNodule_bool
         ]
 
+        # 良性腫瘍サンプルのリスト
+        self.benign_list = [
+            nt for nt in self.positive_list if not nt.isMal_bool
+        ]
+
+        # 悪性腫瘍サンプルのリスト
+        self.malignancy_list = [
+            nt for nt in self.positive_list if nt.isMal_bool
+        ]
+
         log.info(
             "{!r}: {} {} samples, {} neg, {} pos, {} ratio".format(
                 self,
@@ -388,25 +457,23 @@ class LunaDataset(Dataset):
             )
         )
 
-
     def shuffleSamples(self):
-        # 各エポックの最初にこの関数を実行し, サンプルの順序をランダムに変更する
         if self.ratio_int:
+            random.shuffle(self.candidateInfo_list)
             random.shuffle(self.negative_list)
             random.shuffle(self.positive_list)
-    
+            random.shuffle(self.benign_list)
+            random.shuffle(self.malignancy_list)
 
     def __len__(self):
         if self.ratio_int:
-            # 訓練セットのバランスを取るために陽性サンプルを何度も繰り返し使うので,
-            # 実際のサンプル数は関係がなくなり, 「エポック全体」が本来の意味を成さなくなった.
-            # All : 551,065個, Pos : 1,351個, Neg : 549,714個
-            return 200000 # 必ず必要ではないが, ハードコードする. 単純に訓練開始から結果が出るまでを早くする.
+            return 50000
         else:
             return len(self.candidateInfo_list)
-    
-
+        
     def __getitem__(self, ndx):
+
+        # ラベル比率を考慮したデータサンプリング
 
         # バッチ内のデータ比率を整える(ratio_int=1の場合, 陽:陰=1:1, ratio_int=2の場合, 陽:陰=1:2)
         # 比率内個数 self.ratio_int + 1, 1:2の場合 2+1 = 3
@@ -424,7 +491,7 @@ class LunaDataset(Dataset):
             if ndx % (self.ratio_int + 1): # 余りが0でない場合は陰性サンプル
                 neg_ndx = ndx - 1 - pos_ndx
                 neg_ndx %= len(self.negative_list) # オーバーフロー対策, 陰性サンプルリストを一周したら0からスタート
-                candidateInfo_tup = self.negative_list[neg_ndx]
+                candidateInfo_tup = self.negative_list[neg_ndx] 
             else:
                 pos_ndx %= len(self.positive_list) # オーバーフロー対策, 陽性サンプルリストを一周したら0からスタート
                 candidateInfo_tup = self.positive_list[pos_ndx]
@@ -434,26 +501,21 @@ class LunaDataset(Dataset):
             # バランスを取らない場合(ratio_int=0), N番目のサンプルをシンプルに返す.
             candidateInfo_tup = self.candidateInfo_list[ndx]
 
-
+        # 新規関数(リーク防止目的)
+        return self.sampleFromCandidateInfo_tup(
+            candidateInfo_tup,
+            candidateInfo_tup.isNodule_bool
+        )
+    
+    def sampleFromCandidateInfo_tup(self,
+                                    candidateInfo_tup,
+                                    label_bool):
+                                    
         width_irc = (32, 48, 48)
-
-        # @note ディスクキャッシュに登録済みを呼び出す.
-        # @warning データ拡張を行う前にキャッシュを作成すること.
-        # さもないと, データ拡張が1回しか行われないことになる.
-        # 最初のデータ拡張の結果をキャッシュしてしまうため.
-        candidate_a, center_irc = getCtRawCandidate(
-            raw_datasetdir = self.raw_datasetdir,
-            series_uid = candidateInfo_tup.series_uid,
-            center_xyz = candidateInfo_tup.center_xyz,
-            width_irc = width_irc,
-            )
-
-        candidate_t = torch.from_numpy(candidate_a)
-        candidate_t = candidate_t.to(torch.float32)
-        candidate_t = candidate_t.unsqueeze(0)
 
         '''データ拡張'''
         if self.augmentation_dict:
+            # @note ディスクキャッシュに登録済みを呼び出す.
             candidate_t, center_irc = getCtAugmentedCandidate(
                 raw_datasetdir=self.raw_datasetdir,
                 augmentation_dict=self.augmentation_dict,
@@ -463,7 +525,7 @@ class LunaDataset(Dataset):
                 use_cache = self.use_cache,
                 )
         elif self.use_cache:
-            # ディスクキャッシュ済みのcallableをinvoke
+            # @note ディスクキャッシュに登録済みを呼び出す.
             candidate_a, center_irc = getCtRawCandidate(
                 raw_datasetdir=self.raw_datasetdir,
                 series_uid = candidateInfo_tup.series_uid,
@@ -474,6 +536,7 @@ class LunaDataset(Dataset):
             candidate_t = candidate_t.unsqueeze(0)
         else:
             ct = getCt(candidateInfo_tup.series_uid, self.raw_datasetdir)
+            # @note ディスクキャッシュに登録済みを呼び出す.
             candidate_a, center_irc = ct.getRawCandidate(
                 candidateInfo_tup.center_xyz,
                 width_irc,
@@ -481,17 +544,51 @@ class LunaDataset(Dataset):
             candidate_t = torch.from_numpy(candidate_a).to(torch.float32)
             candidate_t = candidate_t.unsqueeze(0)
 
-        pos_t = torch.tensor([
-            not candidateInfo_tup.isNodule_bool,
-            candidateInfo_tup.isNodule_bool
-            ],
-            dtype=torch.long
-        )
+        label_t = torch.tensor([False, False], dtype=torch.long)
+
+        if not label_bool:
+            label_t[0] = True
+            index_t = 0
+        else:
+            label_t[1] = True
+            index_t = 1
 
         return (
-            candidate_t, 
-            pos_t, 
-            candidateInfo_tup.series_uid, 
+            candidate_t,
+            label_t,
+            index_t,
+            candidateInfo_tup.series_uid,
             torch.tensor(center_irc),
         )
 
+
+class MalignantLunaDataset(LunaDataset):
+
+    # override
+    def __len__(self):
+        if self.ratio_int:
+            return 100000
+        else:
+            return len(self.benign_list + self.malignancy_list)
+        
+    # override
+    def __getitem__(self, ndx):
+        if self.ratio_int:
+            if ndx % 2 != 0: # 奇数 => 悪性腫瘍
+                candidateInfo_tup = self.malignancy_list[(ndx // 2) % len(self.malignancy_list)]
+            elif ndx % 4 == 0: # 4の倍数 => 良性腫瘍
+                candidateInfo_tup = self.benign_list[(ndx // 4) % len(self.benign_list)]
+            else: # その他 => 非結節
+                candidateInfo_tup = self.negative_list[(ndx // 4) % len(self.negative_list)]
+            
+        else:
+            if ndx >= len(self.benign_list):
+                candidateInfo_tup = self.malignancy_list[ndx - len(self.benign_list)]
+            else:
+                candidateInfo_tup = self.benign_list[ndx]
+        
+        return self.sampleFromCandidateInfo_tup(
+            candidateInfo_tup,
+            candidateInfo_tup.isMal_bool,
+        )
+                
