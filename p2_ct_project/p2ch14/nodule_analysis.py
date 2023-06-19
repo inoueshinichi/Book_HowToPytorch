@@ -1,4 +1,9 @@
-"""各CTに対して、セグメンテーション、グループ化、結節候補の分類、腫瘍の分類
+"""検証データセットの各CTに対して、
+   1. セグメンテーションによる結節候補の検出
+   2. 結節候補のグループ化
+   3. 結節候補の分類
+   4. 結節の分類
+   を一気通貫で行う自動検査システム
 """
 
 import os
@@ -537,24 +542,49 @@ class NoduleAnalysisApp:
             }
     
 
+        # 統計情報のカウント
+        for series_uid in filtered_list:
+            probability_float, center_irc = series2iagnosis_dict.get(series_uid, (0.0, None))
+            if center_irc is not None:
+                center_irc = tuple(int(x.item()) for x in center_irc)
+            
+            positive_bool = series_uid in positive_set
+            prediction_bool = probability_float > 0.5
+            correct_bool = (positive_bool == prediction_bool)
+
+            if positive_bool and prediction_bool:
+                count_dict['tp'] += 1 # 真陽性
+            if not positive_bool and not prediction_bool:
+                count_dict['tn'] += 1 # 真陰性
+            if not positive_bool and prediction_bool:
+                count_dict['fp'] += 1 # 偽陽性
+            if positive_bool and not prediction_bool:
+                count_dict['fn'] += 1 # 偽陰性
+            
+            log.info("{} {} Label:{!r:5} Correct?:{!r:5} Value:{:.4f} {}".format(
+                mode_str,
+                series_uid,
+                positive_bool,
+                prediction_bool,
+                correct_bool,
+                probability_float,
+                center_irc,
+            ))
+
+        total_count = sum(count_dict.values())
+        percent_dict = {k: v / (total_count or 1) * 100 for k, v in count_dict.items() }
+
+        precision = percent_dict['p'] = count_dict['tp'] / ((count_dict['tp'] + count_dict['fp']) or 1)
+        recall = percent_dict['r'] = count_dict['tp'] / ((count_dict['tp'] + count_dict['fn']) or 1)
+        percent_dict['f1'] = 2 * (precision * recall) / ((precision + recall) or 1)
+
+        log.info(mode_str + " tp:{tp:.f1}%, tn:{tn:.1f}%, fp:{fp:.1f}%, fn:{fn:.1f}%".format(
+            **percent_dict
+        ))
+        log.info(mode_str + " precision:{p:.3f}, recall:{r:.3f}, F1:{f1:.3f}".format(
+            **percent_dict
+        ))
 
 
-
-        
-        
-
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
+if __name__ == "__main__":
+    NoduleAnalysisApp().main()
