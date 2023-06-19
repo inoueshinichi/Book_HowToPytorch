@@ -39,6 +39,7 @@ from p2ch14.dataset_luna_end_to_end import (
 from p2ch13.model_unet import UNetWrapper
 
 import p2ch11
+import p2ch14
 
 
 log = logging.getLogger(__name__)
@@ -370,6 +371,7 @@ class NoduleAnalysisApp:
 
         all_confusion = np.zeros((3,4), dtype=np.int32)
 
+        # series_uidについてループ
         for _, series_uid in series_iter:
 
             ct = getCt(series_uid, raw_datasetdir=self.cli_args.datasetdir)
@@ -422,6 +424,8 @@ class NoduleAnalysisApp:
                            ct,
                            candidateInfo_list,
                            ):
+        
+        # 結節候補に関するリストに基づいたデータローダーを作成
         cls_dl = self.initClassificationDl(candidateInfo_list)
         classifications_list = []
         for batch_nd, batch_tup in enumerate(cls_dl):
@@ -429,7 +433,10 @@ class NoduleAnalysisApp:
 
             input_g = input_t.to(self.device)
             with torch.no_grad():
+                # 結節分類器の実行
                 _, probability_nodule_g = self.cls_model(input_g)
+
+                # 悪性腫瘍モデルがあれば, それも実行
                 if self.malignancy_model is not None:
                     _, probability_mal_g = self.malignancy_model(input_g)
                 else:
@@ -450,6 +457,95 @@ class NoduleAnalysisApp:
                 cls_tup = (prob_nodule, prob_mal, center_xyz, center_irc)
                 classifications_list.append(cls_tup)
         return classifications_list
+    
+
+    def segmentCt(self,
+                  ct,
+                  series_uid,
+                  ):
+        
+        # 勾配計算を必要としないのでグラフは作らない
+        with torch.no_grad():
+            output_a = np.zeros_like(ct.hu_a, dtype=np.float32)
+
+            # CTをバッチ毎にループさせるデータローダ
+            seg_dl = self.initSegmentationDl(series_uid)
+
+
+            # [ct_t, pos_t, series_uid, slice_ndx]のバッチ
+            # input_t : N個のc_t_t
+            for input_t, _, _, slice_ndx_list in seg_dl:
+                input_g = input_t.to(self.device) # to GPU
+
+                # semantic segmentaiton
+                prediction_g = self.seg_model(input_g)
+
+                for i, slice_ndx in enumerate(slice_ndx_list):
+                    output_a[slice_ndx] = prediction_g[i].cpu().numpy()
+
+            # 確率値の閾値処理. その後, erosion(収縮)処理
+            mask_a = output_a > 0.5
+            mask_a = morphology.binary_erosion(mask_a, iterations=1)
+
+            return mask_a
+        
+    
+    def groupSegmentationOutput(self, 
+                                series_uid, 
+                                ct,
+                                clean_a,
+                                ):
+        # 3Dラベリング
+        candidateLabel_a, candidate_count = measurements.label(clean_a)
+
+        # 各結節候補の塊の中心インデックス(I,R,C)
+        centerIrc_list = measurements.center_of_mass(
+            ct.hu_a.clip(-1000, 1000) + 1001,
+            labels=candidateLabel_a,
+            index=np.arange(1, candidate_count + 1),
+        )
+
+        # 結節候補を示すタプルを構築し, 検出リストに追加
+        candidateInfo_list = []
+        for i, center_irc in enumerate(centerIrc_list):
+            center_xyz = irc2xyz(
+                center_irc,
+                ct.origin_xyz,
+                ct.vxSize_xyz,
+                ct.direction_a,
+            )
+            assert np.all(np.isfinite(center_irc)), repr(['irc', center_irc, i, candidate_count])
+            assert np.all(np.isfinite(center_xyz)), repr(['xyz', center_xyz])
+            candidateInfo_tup = CandidateInfoTuple(False, False, False, 0.0,series_uid, center_xyz)
+
+            candidateInfo_list.append(candidateInfo_tup)
+
+
+        return candidateInfo_list
+    
+    def logResult(self,
+                  mode_str,
+                  filtered_list,
+                  series2iagnosis_dict,
+                  positive_set,
+                  ):
+        count_dict = {
+            'tp':0, # 真陽性
+            'tn':0, # 偽陽性
+            'fp':0, # 真陰性
+            'fn':0, # 偽陰性
+            }
+    
+
+
+
+
+        
+        
+
+
+
+
 
 
 
